@@ -1,0 +1,3733 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>WoundMeasure AI — MVP</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js">\nlet patientDocDataURL=null;\ndocument.getElementById('patientDoc').addEventListener('change',e=>{const f=e.target.files&&e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{patientDocDataURL=r.result;document.getElementById('ocrPreview').src=r.result;document.getElementById('ocrStatus').textContent='Image loaded. Tap Run OCR.'};r.readAsDataURL(f)});\nfunction normalizeDigits(s){const fa='۰۱۲۳۴۵۶۷۸۹',ar='٠١٢٣٤٥٦٧٨٩';return(s||'').replace(/[۰-۹]/g,d=>fa.indexOf(d)).replace(/[٠-٩]/g,d=>ar.indexOf(d))}\nasync function runOCR(){if(!patientDocDataURL){alert('Take or choose a patient document image first.');return}const status=document.getElementById('ocrStatus');try{status.textContent='OCR is running…';const result=await Tesseract.recognize(patientDocDataURL,'fas+eng',{logger:m=>{if(m.status)status.textContent=m.status+(m.progress?' '+Math.round(m.progress*100)+'%':'')}});document.getElementById('ocrText').value=result.data.text||'';status.textContent='OCR complete. Review the text, then tap Fill fields from OCR.'}catch(err){status.textContent='OCR failed: '+err.message}}\nfunction parseOCR(){let raw=document.getElementById('ocrText').value||'';if(!raw.trim()){alert('Run OCR or paste OCR text first.');return}const text=normalizeDigits(raw).replace(/\\r/g,'');const lines=text.split('\\n').map(x=>x.trim()).filter(Boolean);const val=keys=>{for(const line of lines){for(const k of keys){const m=line.match(new RegExp('(?:'+k+')\\\\s*[:：-]?\\\\s*(.+)$','i'));if(m&&m[1])return m[1].trim()}}return''};let first=val(['نام(?! خانوادگی)','first\\s*name']);let last=val(['نام\\s*خانوادگی','family\\s*name','last\\s*name','surname']);let nid=val(['کد\\s*ملی','national\\s*(?:id|code)']);let age=val(['سن','age']);let phone=val(['شماره\\s*تماس','تلفن','موبایل','mobile','phone','tel']);let mrn=val(['شماره\\s*پرونده','پرونده','medical\\s*record','mrn','file\\s*no']);let hospital=val(['نام\\s*بیمارستان','بیمارستان','hospital']);let adm=val(['تاریخ\\s*بستری','تاریخ\\s*پذیرش','admission\\s*date','date\\s*of\\s*admission']);let sex=val(['جنسیت','جنس','sex','gender']);if(!nid){const m=text.match(/\\b\\d{10}\\b/);if(m)nid=m[0]}if(!phone){const m=text.match(/(?:\\+98|0098|0)?9\\d{9}\\b/);if(m)phone=m[0]}if(!mrn){const m=text.match(/(?:MRN|پرونده)\\s*[:：-]?\\s*(\\d{3,12})/i);if(m)mrn=m[1]}if(!adm){const m=text.match(/\\b(?:13|14)\\d{2}[\\/\\-]\\d{1,2}[\\/\\-]\\d{1,2}\\b|\\b20\\d{2}[\\/\\-]\\d{1,2}[\\/\\-]\\d{1,2}\\b/);if(m)adm=m[0]}const set=(id,v)=>{if(v)document.getElementById(id).value=v};set('firstName',first);set('lastName',last);set('nationalId',(nid||'').replace(/\\D/g,''));if(age){const m=age.match(/\\d{1,3}/);if(m)set('patientAge',m[0])}set('phone',(phone||'').replace(/[^\\d+]/g,''));set('mrn',mrn);set('hospital',hospital);set('admissionDate',adm);if(sex){const s=sex.toLowerCase(),el=document.getElementById('patientSex');if(/مرد|male|man/.test(s))el.value='Male';else if(/زن|female|woman/.test(s))el.value='Female'}document.getElementById('ocrStatus').textContent='Fields populated where labels were recognized. Verify against the original document.'}\nfunction clearPatientOCR(){document.getElementById('patientDoc').value='';document.getElementById('ocrPreview').removeAttribute('src');document.getElementById('ocrText').value='';document.getElementById('ocrStatus').textContent='Scan cleared.';patientDocDataURL=null}\n
+
+const tbsaSets={
+ adult:[
+  ['Head anterior',4.5],['Head posterior',4.5],['Anterior trunk',18],['Posterior trunk',18],
+  ['Right arm anterior',4.5],['Right arm posterior',4.5],['Left arm anterior',4.5],['Left arm posterior',4.5],
+  ['Right leg anterior',9],['Right leg posterior',9],['Left leg anterior',9],['Left leg posterior',9],['Perineum',1]
+ ],
+ child:[
+  ['Head anterior',9],['Head posterior',9],['Anterior trunk',18],['Posterior trunk',18],
+  ['Right arm anterior',4.5],['Right arm posterior',4.5],['Left arm anterior',4.5],['Left arm posterior',4.5],
+  ['Right leg anterior',7],['Right leg posterior',7],['Left leg anterior',7],['Left leg posterior',7],['Perineum',1]
+ ]
+};
+let tbsaSelected=new Set();
+let currentTBSA=0;
+
+function renderTBSA(){
+  const box=document.getElementById('tbsaRegions'); if(!box)return;
+  tbsaSelected.clear(); box.innerHTML='';
+  const rows=tbsaSets[document.getElementById('tbsaAge').value];
+  rows.forEach((r,i)=>{
+    const b=document.createElement('button');
+    b.type='button'; b.className='secondary'; b.style.textAlign='left';
+    b.innerHTML=`${r[0]} <span class="small">(${r[1]}%)</span>`;
+    b.onclick=()=>{
+      if(tbsaSelected.has(i)){tbsaSelected.delete(i);b.style.outline='';}
+      else{tbsaSelected.add(i);b.style.outline='3px solid #2563eb';}
+      calcTBSA();
+    };
+    box.appendChild(b);
+  });
+  calcTBSA();
+}
+function calcTBSA(){
+  if(!document.getElementById('tbsaAge'))return;
+  const rows=tbsaSets[document.getElementById('tbsaAge').value];
+  let total=Math.max(0,parseFloat(document.getElementById('tbsaPalm').value)||0), parts=[];
+  tbsaSelected.forEach(i=>{total+=rows[i][1];parts.push(`${rows[i][0]} ${rows[i][1]}%`);});
+  currentTBSA=Math.min(100,total);
+  document.getElementById('tbsaTotal').textContent=currentTBSA.toFixed(currentTBSA%1?1:0)+'%';
+  document.getElementById('tbsaBreakdown').textContent=parts.length?parts.join(' · '):'No regions selected.';
+  depthTBSA();
+}
+function depthTBSA(){
+  if(!document.getElementById('tbsaPartial'))return;
+  const p=Math.max(0,parseFloat(document.getElementById('tbsaPartial').value)||0);
+  const f=Math.max(0,parseFloat(document.getElementById('tbsaFull').value)||0);
+  document.getElementById('tbsaPartialOut').textContent=p?p.toFixed(1)+'%':'—';
+  document.getElementById('tbsaFullOut').textContent=f?f.toFixed(1)+'%':'—';
+}
+function resetTBSA(){
+  document.getElementById('tbsaPalm').value=0;
+  document.getElementById('tbsaPartial').value=0;
+  document.getElementById('tbsaFull').value=0;
+  renderTBSA();
+}
+
+
+function val(id){
+  const el=document.getElementById(id);
+  return el ? (el.value!==undefined ? el.value : el.textContent) : '';
+}
+function numberOrBlank(x){
+  return (x===null || x===undefined || Number.isNaN(x)) ? '' : Number(x);
+}
+function collectAppData(includeIdentifiers=true){
+  const a1=S && S[1] ? S[1].area : null;
+  const a2=S && S[2] ? S[2].area : null;
+  const g1=S && S[1] ? S[1].granArea : null;
+  const g2=S && S[2] ? S[2].granArea : null;
+  const gp1=S && S[1] ? S[1].granPct : null;
+  const gp2=S && S[2] ? S[2].granPct : null;
+  const par=(a1&&a2)?((a1-a2)/a1*100):null;
+  const d=typeof daysBetween==='function'?daysBetween():null;
+  const rate=(a1&&a2&&d&&d>0)?((a1-a2)/d*7):null;
+
+  const patientId = val('patientId') || (includeIdentifiers ? ((val('firstName')+' '+val('lastName')).trim()) : ('R-'+Date.now().toString().slice(-8)));
+
+  const data={
+    exported_at:new Date().toISOString(),
+    patient:{
+      patient_id:patientId,
+      first_name:includeIdentifiers?val('firstName'):'',
+      last_name:includeIdentifiers?val('lastName'):'',
+      national_id:includeIdentifiers?val('nationalId'):'',
+      age:val('patientAge'),
+      sex:val('patientSex'),
+      admission_date:val('admissionDate'),
+      phone:includeIdentifiers?val('phone'):'',
+      mrn:includeIdentifiers?val('mrn'):'',
+      hospital:val('hospital')
+    },
+    wound:{
+      location:val('location'),
+      type:val('woundType'),
+      procedure:val('procedure')
+    },
+    baseline:{
+      date:val('date1'),
+      wound_area_cm2:numberOrBlank(a1),
+      granulation_area_cm2:numberOrBlank(g1),
+      granulation_percent:numberOrBlank(gp1)
+    },
+    followup:{
+      date:val('date2'),
+      wound_area_cm2:numberOrBlank(a2),
+      granulation_area_cm2:numberOrBlank(g2),
+      granulation_percent:numberOrBlank(gp2)
+    },
+    comparison:{
+      wound_area_reduction_percent:numberOrBlank(par),
+      healing_rate_cm2_week:numberOrBlank(rate)
+    },
+    tissue:{
+      granulation_percent:val('gran'),
+      slough_percent:val('slough'),
+      necrosis_percent:val('necrosis'),
+      epithelialization_percent:val('epi'),
+      periwound:val('peri'),
+      exudate:val('exudate')
+    },
+    burn:{
+      day_since_burn:val('burnDay'),
+      mechanism:val('burnMechanism'),
+      clinician_impression:val('burnClinician'),
+      color:val('burnColor'),
+      surface:val('burnSurface'),
+      blanching:val('burnBlanch'),
+      pain:val('burnPain'),
+      sensation:val('burnSensation'),
+      texture:val('burnTexture'),
+      tbsa_percent:(typeof currentTBSA!=='undefined'?currentTBSA:''),
+      partial_thickness_tbsa:val('tbsaPartial'),
+      full_thickness_tbsa:val('tbsaFull')
+    },
+    notes:{
+      clinical:val('notes'),
+      generated:val('generated')
+    }
+  };
+  return data;
+}
+function safeFilename(){
+  const mrn=val('mrn') || val('patientId') || 'patient';
+  const date=val('date2') || val('date1') || new Date().toISOString().slice(0,10);
+  return (`WoundMeasure_${mrn}_${date}`).replace(/[^\w\-]+/g,'_');
+}
+function rowsForReport(d){
+  return [
+    ['Patient ID',d.patient.patient_id],['Name',`${d.patient.first_name} ${d.patient.last_name}`.trim()],
+    ['MRN',d.patient.mrn],['Hospital',d.patient.hospital],['Admission date',d.patient.admission_date],
+    ['Wound location',d.wound.location],['Wound type',d.wound.type],['Procedure',d.wound.procedure],
+    ['Baseline date',d.baseline.date],['Baseline wound area (cm²)',d.baseline.wound_area_cm2],
+    ['Baseline granulation area (cm²)',d.baseline.granulation_area_cm2],['Baseline granulation (%)',d.baseline.granulation_percent],
+    ['Follow-up date',d.followup.date],['Follow-up wound area (cm²)',d.followup.wound_area_cm2],
+    ['Follow-up granulation area (cm²)',d.followup.granulation_area_cm2],['Follow-up granulation (%)',d.followup.granulation_percent],
+    ['Wound area reduction (%)',d.comparison.wound_area_reduction_percent],['Healing rate (cm²/week)',d.comparison.healing_rate_cm2_week],
+    ['Burn TBSA (%)',d.burn.tbsa_percent],['Partial-thickness TBSA (%)',d.burn.partial_thickness_tbsa],
+    ['Full-thickness TBSA (%)',d.burn.full_thickness_tbsa]
+  ];
+}
+function exportExcel(){
+  if(typeof XLSX==='undefined'){alert('Excel library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const summary=rowsForReport(d).map(r=>({Parameter:r[0],Value:r[1]}));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(summary),'Summary');
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet([{
+    patient_id:d.patient.patient_id, first_name:d.patient.first_name,last_name:d.patient.last_name,national_id:d.patient.national_id,
+    age:d.patient.age,sex:d.patient.sex,phone:d.patient.phone,mrn:d.patient.mrn,hospital:d.patient.hospital,admission_date:d.patient.admission_date,
+    wound_location:d.wound.location,wound_type:d.wound.type,procedure:d.wound.procedure,
+    baseline_date:d.baseline.date,baseline_area_cm2:d.baseline.wound_area_cm2,baseline_granulation_cm2:d.baseline.granulation_area_cm2,baseline_granulation_pct:d.baseline.granulation_percent,
+    followup_date:d.followup.date,followup_area_cm2:d.followup.wound_area_cm2,followup_granulation_cm2:d.followup.granulation_area_cm2,followup_granulation_pct:d.followup.granulation_percent,
+    wound_area_reduction_pct:d.comparison.wound_area_reduction_percent,healing_rate_cm2_week:d.comparison.healing_rate_cm2_week,
+    tbsa_pct:d.burn.tbsa_percent,partial_tbsa_pct:d.burn.partial_thickness_tbsa,full_tbsa_pct:d.burn.full_thickness_tbsa
+  }]),'Research Data');
+  XLSX.writeFile(wb,safeFilename()+'.xlsx');
+}
+function exportResearchExcel(){
+  if(typeof XLSX==='undefined'){alert('Excel library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(false);
+  const row={
+    research_patient_id:d.patient.patient_id,age:d.patient.age,sex:d.patient.sex,hospital:d.patient.hospital,admission_date:d.patient.admission_date,
+    wound_location:d.wound.location,wound_type:d.wound.type,procedure:d.wound.procedure,
+    baseline_date:d.baseline.date,baseline_area_cm2:d.baseline.wound_area_cm2,baseline_granulation_cm2:d.baseline.granulation_area_cm2,baseline_granulation_pct:d.baseline.granulation_percent,
+    followup_date:d.followup.date,followup_area_cm2:d.followup.wound_area_cm2,followup_granulation_cm2:d.followup.granulation_area_cm2,followup_granulation_pct:d.followup.granulation_percent,
+    wound_area_reduction_pct:d.comparison.wound_area_reduction_percent,healing_rate_cm2_week:d.comparison.healing_rate_cm2_week,
+    tbsa_pct:d.burn.tbsa_percent,partial_tbsa_pct:d.burn.partial_thickness_tbsa,full_tbsa_pct:d.burn.full_thickness_tbsa
+  };
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet([row]),'Anonymized Research');
+  XLSX.writeFile(wb,'Research_'+new Date().toISOString().slice(0,10)+'.xlsx');
+}
+async function exportPDF(){
+  if(!window.jspdf){alert('PDF library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const {jsPDF}=window.jspdf;
+  const pdf=new jsPDF({unit:'mm',format:'a4'});
+  let y=15;
+  pdf.setFontSize(16); pdf.text('WoundMeasure Clinical Report',14,y); y+=9;
+  pdf.setFontSize(9); pdf.text('Generated: '+new Date().toLocaleString(),14,y); y+=8;
+  pdf.setFontSize(10);
+  for(const [k,v] of rowsForReport(d)){
+    const line=`${k}: ${v===null||v===undefined||v===''?'—':v}`;
+    const lines=pdf.splitTextToSize(line,180);
+    if(y+lines.length*5>282){pdf.addPage();y=15;}
+    pdf.text(lines,14,y); y+=lines.length*5+1;
+  }
+  const notes=(d.notes.generated||d.notes.clinical||'').trim();
+  if(notes){
+    y+=4; if(y>250){pdf.addPage();y=15;}
+    pdf.setFontSize(12);pdf.text('Clinical note',14,y);y+=6;pdf.setFontSize(9);
+    const lines=pdf.splitTextToSize(notes,180);
+    for(const ln of lines){if(y>282){pdf.addPage();y=15;}pdf.text(ln,14,y);y+=4.5;}
+  }
+  // Add images when available
+  for(const item of [[1,'Baseline photograph'],[2,'Follow-up photograph']]){
+    const s=S[item[0]];
+    if(s && s.img && s.img.src && s.img.src.startsWith('data:image')){
+      pdf.addPage();pdf.setFontSize(12);pdf.text(item[1],14,15);
+      try{pdf.addImage(s.img.src,'JPEG',14,22,180,135,undefined,'FAST');}catch(e){}
+    }
+  }
+  pdf.save(safeFilename()+'.pdf');
+}
+async function exportWord(){
+  if(typeof docx==='undefined'){alert('Word library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const {Document,Packer,Paragraph,TextRun,Table,TableRow,TableCell,WidthType,HeadingLevel}=docx;
+  const tableRows=rowsForReport(d).map(([k,v])=>new TableRow({children:[
+    new TableCell({children:[new Paragraph({children:[new TextRun({text:String(k),bold:true})]})]}),
+    new TableCell({children:[new Paragraph(String(v===null||v===undefined||v===''?'—':v))]})
+  ]}));
+  const children=[
+    new Paragraph({text:'WoundMeasure Clinical Report',heading:HeadingLevel.TITLE}),
+    new Paragraph('Generated: '+new Date().toLocaleString()),
+    new Table({rows:tableRows,width:{size:100,type:WidthType.PERCENTAGE}}),
+    new Paragraph({text:'Clinical note',heading:HeadingLevel.HEADING_2}),
+    new Paragraph(d.notes.generated||d.notes.clinical||'—')
+  ];
+  const documentFile=new Document({sections:[{children}]});
+  const blob=await Packer.toBlob(documentFile);
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=safeFilename()+'.docx';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+function saveDriveSettings(){
+  localStorage.setItem('woundmeasure_drive_endpoint',val('driveEndpoint'));
+  localStorage.setItem('woundmeasure_drive_folder',val('driveFolder'));
+  const s=document.getElementById('driveStatus');s.className='successbox small';s.textContent='Drive settings saved on this device.';
+}
+function loadDriveSettings(){
+  const e=localStorage.getItem('woundmeasure_drive_endpoint');const f=localStorage.getItem('woundmeasure_drive_folder');
+  if(e&&document.getElementById('driveEndpoint'))document.getElementById('driveEndpoint').value=e;
+  if(f&&document.getElementById('driveFolder'))document.getElementById('driveFolder').value=f;
+}
+async function saveToGoogleDrive(){
+  const endpoint=val('driveEndpoint').trim();
+  const status=document.getElementById('driveStatus');
+  if(!endpoint){status.className='errorbox small';status.textContent='Enter your deployed Google Apps Script Web App URL first.';return;}
+  const payload=collectAppData(true);
+  payload.drive_root_folder=val('driveFolder')||'WoundMeasure';
+  // include current photos if they are browser data URLs
+  payload.images={};
+  if(S[1]&&S[1].img&&S[1].img.src&&S[1].img.src.startsWith('data:image'))payload.images.baseline=S[1].img.src;
+  if(S[2]&&S[2].img&&S[2].img.src&&S[2].img.src.startsWith('data:image'))payload.images.followup=S[2].img.src;
+  status.className='status small';status.textContent='Saving to Google Drive…';
+  try{
+    const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});
+    const txt=await res.text();
+    let result={};try{result=JSON.parse(txt);}catch(e){result={ok:res.ok,message:txt};}
+    if(!res.ok || result.ok===false)throw new Error(result.error||result.message||'Save failed');
+    status.className='successbox small';
+    status.innerHTML=`Saved to Google Drive.${result.folder_url?` <a href="${result.folder_url}" target="_blank">Open patient folder</a>`:''}`;
+  }catch(err){
+    status.className='errorbox small';
+    status.textContent='Google Drive save failed: '+err.message;
+  }
+}
+document.addEventListener('DOMContentLoaded',()=>{loadDriveSettings(); if(document.getElementById('tbsaRegions'))renderTBSA();});
+
+
+let previousPatientResults=[];
+
+function driveEndpoint(){
+  const el=document.getElementById('driveEndpoint');
+  return el ? el.value.trim() : '';
+}
+
+async function searchPreviousPatient(){
+  const endpoint=driveEndpoint();
+  const key=(document.getElementById('searchPatientKey').value||'').trim();
+  const status=document.getElementById('patientSearchStatus');
+  const box=document.getElementById('previousPatientBox');
+
+  if(!endpoint){
+    status.className='errorbox small';
+    status.textContent='Configure your Google Apps Script Web App URL in the Google Drive section first.';
+    return;
+  }
+  if(!key){
+    status.className='errorbox small';
+    status.textContent='Enter an MRN or Patient ID.';
+    return;
+  }
+
+  status.className='status small';
+  status.textContent='Searching Google Drive…';
+  box.style.display='none';
+
+  try{
+    const url=endpoint + (endpoint.includes('?')?'&':'?') +
+      'action=searchPatient&key=' + encodeURIComponent(key) +
+      '&root=' + encodeURIComponent(val('driveFolder')||'WoundMeasure');
+
+    const res=await fetch(url,{method:'GET'});
+    const txt=await res.text();
+    let data={};
+    try{data=JSON.parse(txt);}catch(e){throw new Error(txt||'Invalid server response');}
+    if(!res.ok || data.ok===false) throw new Error(data.error||'Search failed');
+    if(!data.found){
+      previousPatientResults=[];
+      status.className='status small';
+      status.textContent='No patient folder or assessment was found for this MRN/Patient ID.';
+      return;
+    }
+
+    previousPatientResults=data.assessments||[];
+    const p=data.patient||{};
+    document.getElementById('previousPatientTitle').textContent=
+      ((p.first_name||'')+' '+(p.last_name||'')).trim() || p.patient_id || p.mrn || key;
+    document.getElementById('previousPatientMeta').textContent=
+      `MRN: ${p.mrn||'—'} · Patient ID: ${p.patient_id||'—'} · Hospital: ${p.hospital||'—'} · Assessments: ${previousPatientResults.length}`;
+
+    const body=document.getElementById('previousVisitsBody');
+    body.innerHTML='';
+    previousPatientResults.forEach((a,i)=>{
+      const tr=document.createElement('tr');
+      const gran=(a.followup && a.followup.granulation_percent!=='' && a.followup.granulation_percent!=null)
+        ? Number(a.followup.granulation_percent).toFixed(1)+'%' : '—';
+      const area=(a.followup && a.followup.wound_area_cm2!=='' && a.followup.wound_area_cm2!=null)
+        ? Number(a.followup.wound_area_cm2).toFixed(2)+' cm²'
+        : (a.baseline && a.baseline.wound_area_cm2!=='' && a.baseline.wound_area_cm2!=null)
+          ? Number(a.baseline.wound_area_cm2).toFixed(2)+' cm²' : '—';
+      const tbsa=(a.burn && a.burn.tbsa_percent!=='' && a.burn.tbsa_percent!=null)
+        ? Number(a.burn.tbsa_percent).toFixed(1)+'%' : '—';
+      const date=(a.followup&&a.followup.date)||(a.baseline&&a.baseline.date)||a.exported_at||'—';
+      const wound=(a.wound&&a.wound.location)||'—';
+
+      tr.innerHTML=`
+        <td>${escapeHtml(String(date))}</td>
+        <td>${escapeHtml(String(wound))}</td>
+        <td>${escapeHtml(String(area))}</td>
+        <td>${escapeHtml(String(gran))}</td>
+        <td>${escapeHtml(String(tbsa))}</td>
+        <td>
+          <button class="secondary" onclick="openPreviousAssessment(${i})">Open</button>
+          ${a.latest_photo_url ? `<button class="ghost" onclick="loadPreviousPhotoAsGhost(${i})">Ghost</button>` : ''}
+        </td>`;
+      body.appendChild(tr);
+    });
+
+    status.className='successbox small';
+    status.textContent='Patient found. Select a previous assessment.';
+    box.style.display='block';
+  }catch(err){
+    status.className='errorbox small';
+    status.textContent='Search failed: '+err.message;
+  }
+}
+
+function escapeHtml(s){
+  return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+}
+
+function setField(id,value){
+  const el=document.getElementById(id);
+  if(el && value!==undefined && value!==null) el.value=value;
+}
+
+function openPreviousAssessment(i){
+  const d=previousPatientResults[i];
+  if(!d)return;
+  const p=d.patient||{}, w=d.wound||{}, b=d.burn||{}, t=d.tissue||{}, n=d.notes||{};
+
+  setField('patientId',p.patient_id||'');
+  setField('firstName',p.first_name||'');
+  setField('lastName',p.last_name||'');
+  setField('nationalId',p.national_id||'');
+  setField('patientAge',p.age||'');
+  setField('patientSex',p.sex||'');
+  setField('admissionDate',p.admission_date||'');
+  setField('phone',p.phone||'');
+  setField('mrn',p.mrn||'');
+  setField('hospital',p.hospital||'');
+
+  setField('location',w.location||'');
+  setField('woundType',w.type||'');
+  setField('procedure',w.procedure||'');
+
+  setField('date1',(d.followup&&d.followup.date)||(d.baseline&&d.baseline.date)||'');
+  setField('gran',t.granulation_percent||'');
+  setField('slough',t.slough_percent||'');
+  setField('necrosis',t.necrosis_percent||'');
+  setField('epi',t.epithelialization_percent||'');
+  setField('peri',t.periwound||'');
+  setField('exudate',t.exudate||'');
+  setField('notes',n.clinical||'');
+  setField('generated',n.generated||'');
+
+  setField('burnDay',b.day_since_burn||'');
+  setField('burnMechanism',b.mechanism||'');
+  setField('burnClinician',b.clinician_impression||'');
+  setField('burnColor',b.color||'');
+  setField('burnSurface',b.surface||'');
+  setField('burnBlanch',b.blanching||'');
+  setField('burnPain',b.pain||'');
+  setField('burnSensation',b.sensation||'');
+  setField('burnTexture',b.texture||'');
+
+  // Restore numeric previous visit values for comparison.
+  const srcVisit=(d.followup && d.followup.wound_area_cm2!=='' && d.followup.wound_area_cm2!=null) ? d.followup : d.baseline;
+  if(typeof S!=='undefined' && S[1]){
+    S[1].area=srcVisit && srcVisit.wound_area_cm2!=='' ? Number(srcVisit.wound_area_cm2) : null;
+    S[1].granArea=srcVisit && srcVisit.granulation_area_cm2!=='' ? Number(srcVisit.granulation_area_cm2) : null;
+    S[1].granPct=srcVisit && srcVisit.granulation_percent!=='' ? Number(srcVisit.granulation_percent) : null;
+    const area1=document.getElementById('area1');
+    if(area1)area1.textContent=S[1].area!=null?S[1].area.toFixed(2)+' cm²':'—';
+    const ga1=document.getElementById('granArea1');
+    if(ga1)ga1.textContent=S[1].granArea!=null?S[1].granArea.toFixed(2)+' cm²':'—';
+    const gp1=document.getElementById('granPct1');
+    if(gp1)gp1.textContent=S[1].granPct!=null?S[1].granPct.toFixed(1)+'%':'—';
+  }
+
+  if(typeof compare==='function') compare();
+
+  document.getElementById('patientSearchStatus').className='successbox small';
+  document.getElementById('patientSearchStatus').textContent='Previous assessment loaded into the form. You can now take the new follow-up photograph.';
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+async function loadPreviousPhotoAsGhost(i){
+  const d=previousPatientResults[i];
+  if(!d || !d.latest_photo_url){
+    alert('No previous photograph is available for this assessment.');
+    return;
+  }
+  try{
+    const res=await fetch(d.latest_photo_url);
+    if(!res.ok)throw new Error('Photo download failed');
+    const payload=await res.json();
+    if(!payload.ok || !payload.data_url)throw new Error(payload.error||'No image returned');
+    const dataUrl=payload.data_url;
+    {
+      const ghost=document.getElementById('ghostImage');
+      if(ghost)ghost.src=dataUrl;
+
+      const img=new Image();
+      img.onload=()=>{
+        if(typeof S!=='undefined' && S[1]){
+          S[1].img=img;
+          if(typeof redraw==='function') redraw(1);
+        }
+      };
+      img.src=dataUrl;
+
+      document.getElementById('patientSearchStatus').className='successbox small';
+      document.getElementById('patientSearchStatus').textContent='Previous photograph loaded as Ghost Overlay. Open the camera and align the current wound.';
+    }
+  }catch(err){
+    document.getElementById('patientSearchStatus').className='errorbox small';
+    document.getElementById('patientSearchStatus').textContent='Could not load previous photograph: '+err.message;
+  }
+}
+
+function clearPatientSearch(){
+  previousPatientResults=[];
+  document.getElementById('searchPatientKey').value='';
+  document.getElementById('patientSearchStatus').className='status small';
+  document.getElementById('patientSearchStatus').textContent='Enter MRN or Patient ID.';
+  document.getElementById('previousPatientBox').style.display='none';
+  document.getElementById('previousVisitsBody').innerHTML='';
+}
+
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('./service-worker.js').catch(()=>{}));
+}
+
+const WM_DB='WoundMeasureOfflineDB', WM_STORE='records';
+
+function openWMDB(){
+  return new Promise((resolve,reject)=>{
+    const req=indexedDB.open(WM_DB,1);
+    req.onupgradeneeded=()=>{
+      const db=req.result;
+      if(!db.objectStoreNames.contains(WM_STORE)){
+        const s=db.createObjectStore(WM_STORE,{keyPath:'id'});
+        s.createIndex('synced','synced',{unique:false});
+        s.createIndex('saved_at','saved_at',{unique:false});
+      }
+    };
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function dbPut(record){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readwrite');
+    tx.objectStore(WM_STORE).put(record);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+async function dbAll(){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readonly');
+    const req=tx.objectStore(WM_STORE).getAll();
+    req.onsuccess=()=>resolve(req.result||[]);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function dbDelete(id){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readwrite');
+    tx.objectStore(WM_STORE).delete(id);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+function offlineCollectData(){
+  if(typeof collectAppData==='function'){
+    const d=collectAppData(true);
+    d.images=d.images||{};
+    try{
+      if(S[1]&&S[1].img&&S[1].img.src&&S[1].img.src.startsWith('data:image'))d.images.baseline=S[1].img.src;
+      if(S[2]&&S[2].img&&S[2].img.src&&S[2].img.src.startsWith('data:image'))d.images.followup=S[2].img.src;
+    }catch(e){}
+    return d;
+  }
+  return {saved_at:new Date().toISOString()};
+}
+async function saveOfflineRecord(){
+  const s=document.getElementById('offlineStatus');
+  try{
+    const id='WM-'+Date.now();
+    await dbPut({id,saved_at:new Date().toISOString(),synced:false,data:offlineCollectData()});
+    s.textContent='Saved on this device for offline use.';
+    s.className='successbox small';
+    showOfflineRecords();
+  }catch(e){
+    s.textContent='Offline save failed: '+e.message;
+    s.className='errorbox small';
+  }
+}
+async function showOfflineRecords(){
+  const list=document.getElementById('offlineList');
+  const rows=(await dbAll()).sort((a,b)=>String(b.saved_at).localeCompare(String(a.saved_at)));
+  if(!rows.length){list.innerHTML='<div class="small">No offline records stored.</div>';return;}
+  list.innerHTML=rows.map(r=>{
+    const p=(r.data&&r.data.patient)||{};
+    const name=((p.first_name||'')+' '+(p.last_name||'')).trim()||p.patient_id||p.mrn||'Unnamed';
+    return `<div class="kpi" style="margin-bottom:8px"><b>${name}</b><br><span class="small">${new Date(r.saved_at).toLocaleString()} · ${r.synced?'Synced':'Pending sync'}</span><div class="toolbar"><button class="secondary" onclick="deleteOfflineRecord('${r.id}')">Delete</button></div></div>`;
+  }).join('');
+}
+async function deleteOfflineRecord(id){await dbDelete(id);showOfflineRecords();}
+async function syncOfflineRecords(){
+  const s=document.getElementById('offlineStatus');
+  if(!navigator.onLine){s.textContent='No internet connection. Records stay on this device.';s.className='errorbox small';return;}
+  const endpoint=(document.getElementById('driveEndpoint')||{}).value||'';
+  if(!endpoint.trim()){s.textContent='Enter your Google Apps Script URL first.';s.className='errorbox small';return;}
+  const rows=await dbAll(); let ok=0,fail=0;
+  for(const r of rows.filter(x=>!x.synced)){
+    try{
+      r.data.drive_root_folder=((document.getElementById('driveFolder')||{}).value)||'WoundMeasure';
+      const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(r.data)});
+      const t=await res.text(); let j={}; try{j=JSON.parse(t)}catch(e){}
+      if(!res.ok||j.ok===false)throw new Error(j.error||'Sync failed');
+      r.synced=true;r.synced_at=new Date().toISOString();await dbPut(r);ok++;
+    }catch(e){fail++;}
+  }
+  s.textContent=`Sync complete: ${ok} synced, ${fail} failed.`;
+  s.className=fail?'errorbox small':'successbox small';
+  showOfflineRecords();
+}
+window.addEventListener('online',()=>{const s=document.getElementById('offlineStatus');if(s){s.textContent='Internet restored. You can sync pending records.';s.className='successbox small';}});
+window.addEventListener('offline',()=>{const s=document.getElementById('offlineStatus');if(s){s.textContent='Offline mode active.';s.className='status small';}});
+
+</script>
+<style>
+:root{
+  --bg:#f6f8fb; --card:#ffffff; --ink:#172033; --muted:#667085;
+  --line:#dce2ea; --accent:#2563eb; --accent2:#0f766e;
+  --good:#15803d; --bad:#b42318; --warn:#b54708;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:linear-gradient(135deg,#0f172a,#1d4ed8);color:#fff;padding:24px 18px}
+header h1{margin:0 0 4px;font-size:26px}
+header p{margin:0;opacity:.9}
+main{max-width:1100px;margin:0 auto;padding:18px}
+.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;box-shadow:0 2px 8px rgba(16,24,40,.04)}
+.span12{grid-column:span 12}.span6{grid-column:span 6}.span4{grid-column:span 4}
+@media(max-width:800px){.span6,.span4{grid-column:span 12}}
+h2{font-size:18px;margin:0 0 12px} h3{font-size:15px;margin:14px 0 8px}
+label{display:block;font-size:13px;color:#475467;margin:8px 0 5px}
+input,select,textarea,button{font:inherit}
+input,select,textarea{width:100%;padding:10px 11px;border:1px solid var(--line);border-radius:10px;background:#fff}
+textarea{min-height:90px;resize:vertical}
+button{border:0;border-radius:10px;padding:10px 14px;background:var(--accent);color:#fff;font-weight:700;cursor:pointer}
+button.secondary{background:#eef2ff;color:#253b80}
+button.ghost{background:#eef7f6;color:#115e59}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media(max-width:560px){.row{grid-template-columns:1fr}}
+.photo-wrap{border:1px dashed #b8c2d1;border-radius:14px;padding:10px;background:#fbfdff}
+canvas{width:100%;height:auto;display:block;border-radius:10px;background:#eef2f6;touch-action:none}
+.small{font-size:12px;color:var(--muted);line-height:1.45}
+.kpi{padding:12px;border-radius:12px;background:#f8fafc;border:1px solid var(--line)}
+.kpi .v{font-size:22px;font-weight:800;margin-top:4px}
+.badge{display:inline-block;border-radius:999px;padding:5px 9px;font-size:12px;font-weight:700}
+.good{background:#ecfdf3;color:var(--good)} .bad{background:#fef3f2;color:var(--bad)} .warn{background:#fffaeb;color:var(--warn)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{border-bottom:1px solid var(--line);text-align:left;padding:9px}
+th{color:#475467;background:#f9fafb}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.note{padding:10px 12px;background:#fff7ed;border-left:4px solid #f59e0b;border-radius:8px;font-size:13px;color:#7c2d12}
+.footer{padding:18px;text-align:center;color:var(--muted);font-size:12px}
+#chart{height:240px;width:100%}
+
+.camera-box{position:relative;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#000;aspect-ratio:4/3}
+.camera-box video,.camera-box img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+.camera-box img{pointer-events:none;opacity:.35}
+.camera-box .guide{position:absolute;inset:12%;border:2px dashed rgba(255,255,255,.75);border-radius:16px;pointer-events:none}
+.range-row{display:flex;gap:10px;align-items:center}.range-row input[type=range]{flex:1}
+.metric-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}@media(max-width:800px){.metric-grid{grid-template-columns:1fr 1fr}}
+
+.patient-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+@media(max-width:800px){.patient-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:520px){.patient-grid{grid-template-columns:1fr}}
+.ocr-wrap{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:760px){.ocr-wrap{grid-template-columns:1fr}}
+.ocr-preview{width:100%;max-height:360px;object-fit:contain;border:1px solid var(--line);border-radius:12px;background:#f8fafc}
+.ocr-status{padding:10px;border:1px solid var(--line);border-radius:10px;background:#f8fafc;margin-top:8px}
+
+.export-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+@media(max-width:850px){.export-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:480px){.export-grid{grid-template-columns:1fr}}
+.export-btn{min-height:64px}
+.drive-settings{display:grid;grid-template-columns:2fr 1fr;gap:10px}
+@media(max-width:700px){.drive-settings{grid-template-columns:1fr}}
+.successbox{background:#ecfdf3;border:1px solid #bbf7d0;color:#166534;padding:10px;border-radius:10px}
+.errorbox{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:10px;border-radius:10px}
+
+</style>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js">
+const tbsaSets={
+ adult:[
+  ['Head anterior',4.5],['Head posterior',4.5],['Anterior trunk',18],['Posterior trunk',18],
+  ['Right arm anterior',4.5],['Right arm posterior',4.5],['Left arm anterior',4.5],['Left arm posterior',4.5],
+  ['Right leg anterior',9],['Right leg posterior',9],['Left leg anterior',9],['Left leg posterior',9],['Perineum',1]
+ ],
+ child:[
+  ['Head anterior',9],['Head posterior',9],['Anterior trunk',18],['Posterior trunk',18],
+  ['Right arm anterior',4.5],['Right arm posterior',4.5],['Left arm anterior',4.5],['Left arm posterior',4.5],
+  ['Right leg anterior',7],['Right leg posterior',7],['Left leg anterior',7],['Left leg posterior',7],['Perineum',1]
+ ]
+};
+let tbsaSelected=new Set();
+let currentTBSA=0;
+
+function renderTBSA(){
+  const box=document.getElementById('tbsaRegions'); if(!box)return;
+  tbsaSelected.clear(); box.innerHTML='';
+  const rows=tbsaSets[document.getElementById('tbsaAge').value];
+  rows.forEach((r,i)=>{
+    const b=document.createElement('button');
+    b.type='button'; b.className='secondary'; b.style.textAlign='left';
+    b.innerHTML=`${r[0]} <span class="small">(${r[1]}%)</span>`;
+    b.onclick=()=>{
+      if(tbsaSelected.has(i)){tbsaSelected.delete(i);b.style.outline='';}
+      else{tbsaSelected.add(i);b.style.outline='3px solid #2563eb';}
+      calcTBSA();
+    };
+    box.appendChild(b);
+  });
+  calcTBSA();
+}
+function calcTBSA(){
+  if(!document.getElementById('tbsaAge'))return;
+  const rows=tbsaSets[document.getElementById('tbsaAge').value];
+  let total=Math.max(0,parseFloat(document.getElementById('tbsaPalm').value)||0), parts=[];
+  tbsaSelected.forEach(i=>{total+=rows[i][1];parts.push(`${rows[i][0]} ${rows[i][1]}%`);});
+  currentTBSA=Math.min(100,total);
+  document.getElementById('tbsaTotal').textContent=currentTBSA.toFixed(currentTBSA%1?1:0)+'%';
+  document.getElementById('tbsaBreakdown').textContent=parts.length?parts.join(' · '):'No regions selected.';
+  depthTBSA();
+}
+function depthTBSA(){
+  if(!document.getElementById('tbsaPartial'))return;
+  const p=Math.max(0,parseFloat(document.getElementById('tbsaPartial').value)||0);
+  const f=Math.max(0,parseFloat(document.getElementById('tbsaFull').value)||0);
+  document.getElementById('tbsaPartialOut').textContent=p?p.toFixed(1)+'%':'—';
+  document.getElementById('tbsaFullOut').textContent=f?f.toFixed(1)+'%':'—';
+}
+function resetTBSA(){
+  document.getElementById('tbsaPalm').value=0;
+  document.getElementById('tbsaPartial').value=0;
+  document.getElementById('tbsaFull').value=0;
+  renderTBSA();
+}
+
+
+function val(id){
+  const el=document.getElementById(id);
+  return el ? (el.value!==undefined ? el.value : el.textContent) : '';
+}
+function numberOrBlank(x){
+  return (x===null || x===undefined || Number.isNaN(x)) ? '' : Number(x);
+}
+function collectAppData(includeIdentifiers=true){
+  const a1=S && S[1] ? S[1].area : null;
+  const a2=S && S[2] ? S[2].area : null;
+  const g1=S && S[1] ? S[1].granArea : null;
+  const g2=S && S[2] ? S[2].granArea : null;
+  const gp1=S && S[1] ? S[1].granPct : null;
+  const gp2=S && S[2] ? S[2].granPct : null;
+  const par=(a1&&a2)?((a1-a2)/a1*100):null;
+  const d=typeof daysBetween==='function'?daysBetween():null;
+  const rate=(a1&&a2&&d&&d>0)?((a1-a2)/d*7):null;
+
+  const patientId = val('patientId') || (includeIdentifiers ? ((val('firstName')+' '+val('lastName')).trim()) : ('R-'+Date.now().toString().slice(-8)));
+
+  const data={
+    exported_at:new Date().toISOString(),
+    patient:{
+      patient_id:patientId,
+      first_name:includeIdentifiers?val('firstName'):'',
+      last_name:includeIdentifiers?val('lastName'):'',
+      national_id:includeIdentifiers?val('nationalId'):'',
+      age:val('patientAge'),
+      sex:val('patientSex'),
+      admission_date:val('admissionDate'),
+      phone:includeIdentifiers?val('phone'):'',
+      mrn:includeIdentifiers?val('mrn'):'',
+      hospital:val('hospital')
+    },
+    wound:{
+      location:val('location'),
+      type:val('woundType'),
+      procedure:val('procedure')
+    },
+    baseline:{
+      date:val('date1'),
+      wound_area_cm2:numberOrBlank(a1),
+      granulation_area_cm2:numberOrBlank(g1),
+      granulation_percent:numberOrBlank(gp1)
+    },
+    followup:{
+      date:val('date2'),
+      wound_area_cm2:numberOrBlank(a2),
+      granulation_area_cm2:numberOrBlank(g2),
+      granulation_percent:numberOrBlank(gp2)
+    },
+    comparison:{
+      wound_area_reduction_percent:numberOrBlank(par),
+      healing_rate_cm2_week:numberOrBlank(rate)
+    },
+    tissue:{
+      granulation_percent:val('gran'),
+      slough_percent:val('slough'),
+      necrosis_percent:val('necrosis'),
+      epithelialization_percent:val('epi'),
+      periwound:val('peri'),
+      exudate:val('exudate')
+    },
+    burn:{
+      day_since_burn:val('burnDay'),
+      mechanism:val('burnMechanism'),
+      clinician_impression:val('burnClinician'),
+      color:val('burnColor'),
+      surface:val('burnSurface'),
+      blanching:val('burnBlanch'),
+      pain:val('burnPain'),
+      sensation:val('burnSensation'),
+      texture:val('burnTexture'),
+      tbsa_percent:(typeof currentTBSA!=='undefined'?currentTBSA:''),
+      partial_thickness_tbsa:val('tbsaPartial'),
+      full_thickness_tbsa:val('tbsaFull')
+    },
+    notes:{
+      clinical:val('notes'),
+      generated:val('generated')
+    }
+  };
+  return data;
+}
+function safeFilename(){
+  const mrn=val('mrn') || val('patientId') || 'patient';
+  const date=val('date2') || val('date1') || new Date().toISOString().slice(0,10);
+  return (`WoundMeasure_${mrn}_${date}`).replace(/[^\w\-]+/g,'_');
+}
+function rowsForReport(d){
+  return [
+    ['Patient ID',d.patient.patient_id],['Name',`${d.patient.first_name} ${d.patient.last_name}`.trim()],
+    ['MRN',d.patient.mrn],['Hospital',d.patient.hospital],['Admission date',d.patient.admission_date],
+    ['Wound location',d.wound.location],['Wound type',d.wound.type],['Procedure',d.wound.procedure],
+    ['Baseline date',d.baseline.date],['Baseline wound area (cm²)',d.baseline.wound_area_cm2],
+    ['Baseline granulation area (cm²)',d.baseline.granulation_area_cm2],['Baseline granulation (%)',d.baseline.granulation_percent],
+    ['Follow-up date',d.followup.date],['Follow-up wound area (cm²)',d.followup.wound_area_cm2],
+    ['Follow-up granulation area (cm²)',d.followup.granulation_area_cm2],['Follow-up granulation (%)',d.followup.granulation_percent],
+    ['Wound area reduction (%)',d.comparison.wound_area_reduction_percent],['Healing rate (cm²/week)',d.comparison.healing_rate_cm2_week],
+    ['Burn TBSA (%)',d.burn.tbsa_percent],['Partial-thickness TBSA (%)',d.burn.partial_thickness_tbsa],
+    ['Full-thickness TBSA (%)',d.burn.full_thickness_tbsa]
+  ];
+}
+function exportExcel(){
+  if(typeof XLSX==='undefined'){alert('Excel library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const summary=rowsForReport(d).map(r=>({Parameter:r[0],Value:r[1]}));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(summary),'Summary');
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet([{
+    patient_id:d.patient.patient_id, first_name:d.patient.first_name,last_name:d.patient.last_name,national_id:d.patient.national_id,
+    age:d.patient.age,sex:d.patient.sex,phone:d.patient.phone,mrn:d.patient.mrn,hospital:d.patient.hospital,admission_date:d.patient.admission_date,
+    wound_location:d.wound.location,wound_type:d.wound.type,procedure:d.wound.procedure,
+    baseline_date:d.baseline.date,baseline_area_cm2:d.baseline.wound_area_cm2,baseline_granulation_cm2:d.baseline.granulation_area_cm2,baseline_granulation_pct:d.baseline.granulation_percent,
+    followup_date:d.followup.date,followup_area_cm2:d.followup.wound_area_cm2,followup_granulation_cm2:d.followup.granulation_area_cm2,followup_granulation_pct:d.followup.granulation_percent,
+    wound_area_reduction_pct:d.comparison.wound_area_reduction_percent,healing_rate_cm2_week:d.comparison.healing_rate_cm2_week,
+    tbsa_pct:d.burn.tbsa_percent,partial_tbsa_pct:d.burn.partial_thickness_tbsa,full_tbsa_pct:d.burn.full_thickness_tbsa
+  }]),'Research Data');
+  XLSX.writeFile(wb,safeFilename()+'.xlsx');
+}
+function exportResearchExcel(){
+  if(typeof XLSX==='undefined'){alert('Excel library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(false);
+  const row={
+    research_patient_id:d.patient.patient_id,age:d.patient.age,sex:d.patient.sex,hospital:d.patient.hospital,admission_date:d.patient.admission_date,
+    wound_location:d.wound.location,wound_type:d.wound.type,procedure:d.wound.procedure,
+    baseline_date:d.baseline.date,baseline_area_cm2:d.baseline.wound_area_cm2,baseline_granulation_cm2:d.baseline.granulation_area_cm2,baseline_granulation_pct:d.baseline.granulation_percent,
+    followup_date:d.followup.date,followup_area_cm2:d.followup.wound_area_cm2,followup_granulation_cm2:d.followup.granulation_area_cm2,followup_granulation_pct:d.followup.granulation_percent,
+    wound_area_reduction_pct:d.comparison.wound_area_reduction_percent,healing_rate_cm2_week:d.comparison.healing_rate_cm2_week,
+    tbsa_pct:d.burn.tbsa_percent,partial_tbsa_pct:d.burn.partial_thickness_tbsa,full_tbsa_pct:d.burn.full_thickness_tbsa
+  };
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet([row]),'Anonymized Research');
+  XLSX.writeFile(wb,'Research_'+new Date().toISOString().slice(0,10)+'.xlsx');
+}
+async function exportPDF(){
+  if(!window.jspdf){alert('PDF library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const {jsPDF}=window.jspdf;
+  const pdf=new jsPDF({unit:'mm',format:'a4'});
+  let y=15;
+  pdf.setFontSize(16); pdf.text('WoundMeasure Clinical Report',14,y); y+=9;
+  pdf.setFontSize(9); pdf.text('Generated: '+new Date().toLocaleString(),14,y); y+=8;
+  pdf.setFontSize(10);
+  for(const [k,v] of rowsForReport(d)){
+    const line=`${k}: ${v===null||v===undefined||v===''?'—':v}`;
+    const lines=pdf.splitTextToSize(line,180);
+    if(y+lines.length*5>282){pdf.addPage();y=15;}
+    pdf.text(lines,14,y); y+=lines.length*5+1;
+  }
+  const notes=(d.notes.generated||d.notes.clinical||'').trim();
+  if(notes){
+    y+=4; if(y>250){pdf.addPage();y=15;}
+    pdf.setFontSize(12);pdf.text('Clinical note',14,y);y+=6;pdf.setFontSize(9);
+    const lines=pdf.splitTextToSize(notes,180);
+    for(const ln of lines){if(y>282){pdf.addPage();y=15;}pdf.text(ln,14,y);y+=4.5;}
+  }
+  // Add images when available
+  for(const item of [[1,'Baseline photograph'],[2,'Follow-up photograph']]){
+    const s=S[item[0]];
+    if(s && s.img && s.img.src && s.img.src.startsWith('data:image')){
+      pdf.addPage();pdf.setFontSize(12);pdf.text(item[1],14,15);
+      try{pdf.addImage(s.img.src,'JPEG',14,22,180,135,undefined,'FAST');}catch(e){}
+    }
+  }
+  pdf.save(safeFilename()+'.pdf');
+}
+async function exportWord(){
+  if(typeof docx==='undefined'){alert('Word library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const {Document,Packer,Paragraph,TextRun,Table,TableRow,TableCell,WidthType,HeadingLevel}=docx;
+  const tableRows=rowsForReport(d).map(([k,v])=>new TableRow({children:[
+    new TableCell({children:[new Paragraph({children:[new TextRun({text:String(k),bold:true})]})]}),
+    new TableCell({children:[new Paragraph(String(v===null||v===undefined||v===''?'—':v))]})
+  ]}));
+  const children=[
+    new Paragraph({text:'WoundMeasure Clinical Report',heading:HeadingLevel.TITLE}),
+    new Paragraph('Generated: '+new Date().toLocaleString()),
+    new Table({rows:tableRows,width:{size:100,type:WidthType.PERCENTAGE}}),
+    new Paragraph({text:'Clinical note',heading:HeadingLevel.HEADING_2}),
+    new Paragraph(d.notes.generated||d.notes.clinical||'—')
+  ];
+  const documentFile=new Document({sections:[{children}]});
+  const blob=await Packer.toBlob(documentFile);
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=safeFilename()+'.docx';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+function saveDriveSettings(){
+  localStorage.setItem('woundmeasure_drive_endpoint',val('driveEndpoint'));
+  localStorage.setItem('woundmeasure_drive_folder',val('driveFolder'));
+  const s=document.getElementById('driveStatus');s.className='successbox small';s.textContent='Drive settings saved on this device.';
+}
+function loadDriveSettings(){
+  const e=localStorage.getItem('woundmeasure_drive_endpoint');const f=localStorage.getItem('woundmeasure_drive_folder');
+  if(e&&document.getElementById('driveEndpoint'))document.getElementById('driveEndpoint').value=e;
+  if(f&&document.getElementById('driveFolder'))document.getElementById('driveFolder').value=f;
+}
+async function saveToGoogleDrive(){
+  const endpoint=val('driveEndpoint').trim();
+  const status=document.getElementById('driveStatus');
+  if(!endpoint){status.className='errorbox small';status.textContent='Enter your deployed Google Apps Script Web App URL first.';return;}
+  const payload=collectAppData(true);
+  payload.drive_root_folder=val('driveFolder')||'WoundMeasure';
+  // include current photos if they are browser data URLs
+  payload.images={};
+  if(S[1]&&S[1].img&&S[1].img.src&&S[1].img.src.startsWith('data:image'))payload.images.baseline=S[1].img.src;
+  if(S[2]&&S[2].img&&S[2].img.src&&S[2].img.src.startsWith('data:image'))payload.images.followup=S[2].img.src;
+  status.className='status small';status.textContent='Saving to Google Drive…';
+  try{
+    const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});
+    const txt=await res.text();
+    let result={};try{result=JSON.parse(txt);}catch(e){result={ok:res.ok,message:txt};}
+    if(!res.ok || result.ok===false)throw new Error(result.error||result.message||'Save failed');
+    status.className='successbox small';
+    status.innerHTML=`Saved to Google Drive.${result.folder_url?` <a href="${result.folder_url}" target="_blank">Open patient folder</a>`:''}`;
+  }catch(err){
+    status.className='errorbox small';
+    status.textContent='Google Drive save failed: '+err.message;
+  }
+}
+document.addEventListener('DOMContentLoaded',()=>{loadDriveSettings(); if(document.getElementById('tbsaRegions'))renderTBSA();});
+
+
+let previousPatientResults=[];
+
+function driveEndpoint(){
+  const el=document.getElementById('driveEndpoint');
+  return el ? el.value.trim() : '';
+}
+
+async function searchPreviousPatient(){
+  const endpoint=driveEndpoint();
+  const key=(document.getElementById('searchPatientKey').value||'').trim();
+  const status=document.getElementById('patientSearchStatus');
+  const box=document.getElementById('previousPatientBox');
+
+  if(!endpoint){
+    status.className='errorbox small';
+    status.textContent='Configure your Google Apps Script Web App URL in the Google Drive section first.';
+    return;
+  }
+  if(!key){
+    status.className='errorbox small';
+    status.textContent='Enter an MRN or Patient ID.';
+    return;
+  }
+
+  status.className='status small';
+  status.textContent='Searching Google Drive…';
+  box.style.display='none';
+
+  try{
+    const url=endpoint + (endpoint.includes('?')?'&':'?') +
+      'action=searchPatient&key=' + encodeURIComponent(key) +
+      '&root=' + encodeURIComponent(val('driveFolder')||'WoundMeasure');
+
+    const res=await fetch(url,{method:'GET'});
+    const txt=await res.text();
+    let data={};
+    try{data=JSON.parse(txt);}catch(e){throw new Error(txt||'Invalid server response');}
+    if(!res.ok || data.ok===false) throw new Error(data.error||'Search failed');
+    if(!data.found){
+      previousPatientResults=[];
+      status.className='status small';
+      status.textContent='No patient folder or assessment was found for this MRN/Patient ID.';
+      return;
+    }
+
+    previousPatientResults=data.assessments||[];
+    const p=data.patient||{};
+    document.getElementById('previousPatientTitle').textContent=
+      ((p.first_name||'')+' '+(p.last_name||'')).trim() || p.patient_id || p.mrn || key;
+    document.getElementById('previousPatientMeta').textContent=
+      `MRN: ${p.mrn||'—'} · Patient ID: ${p.patient_id||'—'} · Hospital: ${p.hospital||'—'} · Assessments: ${previousPatientResults.length}`;
+
+    const body=document.getElementById('previousVisitsBody');
+    body.innerHTML='';
+    previousPatientResults.forEach((a,i)=>{
+      const tr=document.createElement('tr');
+      const gran=(a.followup && a.followup.granulation_percent!=='' && a.followup.granulation_percent!=null)
+        ? Number(a.followup.granulation_percent).toFixed(1)+'%' : '—';
+      const area=(a.followup && a.followup.wound_area_cm2!=='' && a.followup.wound_area_cm2!=null)
+        ? Number(a.followup.wound_area_cm2).toFixed(2)+' cm²'
+        : (a.baseline && a.baseline.wound_area_cm2!=='' && a.baseline.wound_area_cm2!=null)
+          ? Number(a.baseline.wound_area_cm2).toFixed(2)+' cm²' : '—';
+      const tbsa=(a.burn && a.burn.tbsa_percent!=='' && a.burn.tbsa_percent!=null)
+        ? Number(a.burn.tbsa_percent).toFixed(1)+'%' : '—';
+      const date=(a.followup&&a.followup.date)||(a.baseline&&a.baseline.date)||a.exported_at||'—';
+      const wound=(a.wound&&a.wound.location)||'—';
+
+      tr.innerHTML=`
+        <td>${escapeHtml(String(date))}</td>
+        <td>${escapeHtml(String(wound))}</td>
+        <td>${escapeHtml(String(area))}</td>
+        <td>${escapeHtml(String(gran))}</td>
+        <td>${escapeHtml(String(tbsa))}</td>
+        <td>
+          <button class="secondary" onclick="openPreviousAssessment(${i})">Open</button>
+          ${a.latest_photo_url ? `<button class="ghost" onclick="loadPreviousPhotoAsGhost(${i})">Ghost</button>` : ''}
+        </td>`;
+      body.appendChild(tr);
+    });
+
+    status.className='successbox small';
+    status.textContent='Patient found. Select a previous assessment.';
+    box.style.display='block';
+  }catch(err){
+    status.className='errorbox small';
+    status.textContent='Search failed: '+err.message;
+  }
+}
+
+function escapeHtml(s){
+  return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+}
+
+function setField(id,value){
+  const el=document.getElementById(id);
+  if(el && value!==undefined && value!==null) el.value=value;
+}
+
+function openPreviousAssessment(i){
+  const d=previousPatientResults[i];
+  if(!d)return;
+  const p=d.patient||{}, w=d.wound||{}, b=d.burn||{}, t=d.tissue||{}, n=d.notes||{};
+
+  setField('patientId',p.patient_id||'');
+  setField('firstName',p.first_name||'');
+  setField('lastName',p.last_name||'');
+  setField('nationalId',p.national_id||'');
+  setField('patientAge',p.age||'');
+  setField('patientSex',p.sex||'');
+  setField('admissionDate',p.admission_date||'');
+  setField('phone',p.phone||'');
+  setField('mrn',p.mrn||'');
+  setField('hospital',p.hospital||'');
+
+  setField('location',w.location||'');
+  setField('woundType',w.type||'');
+  setField('procedure',w.procedure||'');
+
+  setField('date1',(d.followup&&d.followup.date)||(d.baseline&&d.baseline.date)||'');
+  setField('gran',t.granulation_percent||'');
+  setField('slough',t.slough_percent||'');
+  setField('necrosis',t.necrosis_percent||'');
+  setField('epi',t.epithelialization_percent||'');
+  setField('peri',t.periwound||'');
+  setField('exudate',t.exudate||'');
+  setField('notes',n.clinical||'');
+  setField('generated',n.generated||'');
+
+  setField('burnDay',b.day_since_burn||'');
+  setField('burnMechanism',b.mechanism||'');
+  setField('burnClinician',b.clinician_impression||'');
+  setField('burnColor',b.color||'');
+  setField('burnSurface',b.surface||'');
+  setField('burnBlanch',b.blanching||'');
+  setField('burnPain',b.pain||'');
+  setField('burnSensation',b.sensation||'');
+  setField('burnTexture',b.texture||'');
+
+  // Restore numeric previous visit values for comparison.
+  const srcVisit=(d.followup && d.followup.wound_area_cm2!=='' && d.followup.wound_area_cm2!=null) ? d.followup : d.baseline;
+  if(typeof S!=='undefined' && S[1]){
+    S[1].area=srcVisit && srcVisit.wound_area_cm2!=='' ? Number(srcVisit.wound_area_cm2) : null;
+    S[1].granArea=srcVisit && srcVisit.granulation_area_cm2!=='' ? Number(srcVisit.granulation_area_cm2) : null;
+    S[1].granPct=srcVisit && srcVisit.granulation_percent!=='' ? Number(srcVisit.granulation_percent) : null;
+    const area1=document.getElementById('area1');
+    if(area1)area1.textContent=S[1].area!=null?S[1].area.toFixed(2)+' cm²':'—';
+    const ga1=document.getElementById('granArea1');
+    if(ga1)ga1.textContent=S[1].granArea!=null?S[1].granArea.toFixed(2)+' cm²':'—';
+    const gp1=document.getElementById('granPct1');
+    if(gp1)gp1.textContent=S[1].granPct!=null?S[1].granPct.toFixed(1)+'%':'—';
+  }
+
+  if(typeof compare==='function') compare();
+
+  document.getElementById('patientSearchStatus').className='successbox small';
+  document.getElementById('patientSearchStatus').textContent='Previous assessment loaded into the form. You can now take the new follow-up photograph.';
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+async function loadPreviousPhotoAsGhost(i){
+  const d=previousPatientResults[i];
+  if(!d || !d.latest_photo_url){
+    alert('No previous photograph is available for this assessment.');
+    return;
+  }
+  try{
+    const res=await fetch(d.latest_photo_url);
+    if(!res.ok)throw new Error('Photo download failed');
+    const payload=await res.json();
+    if(!payload.ok || !payload.data_url)throw new Error(payload.error||'No image returned');
+    const dataUrl=payload.data_url;
+    {
+      const ghost=document.getElementById('ghostImage');
+      if(ghost)ghost.src=dataUrl;
+
+      const img=new Image();
+      img.onload=()=>{
+        if(typeof S!=='undefined' && S[1]){
+          S[1].img=img;
+          if(typeof redraw==='function') redraw(1);
+        }
+      };
+      img.src=dataUrl;
+
+      document.getElementById('patientSearchStatus').className='successbox small';
+      document.getElementById('patientSearchStatus').textContent='Previous photograph loaded as Ghost Overlay. Open the camera and align the current wound.';
+    }
+  }catch(err){
+    document.getElementById('patientSearchStatus').className='errorbox small';
+    document.getElementById('patientSearchStatus').textContent='Could not load previous photograph: '+err.message;
+  }
+}
+
+function clearPatientSearch(){
+  previousPatientResults=[];
+  document.getElementById('searchPatientKey').value='';
+  document.getElementById('patientSearchStatus').className='status small';
+  document.getElementById('patientSearchStatus').textContent='Enter MRN or Patient ID.';
+  document.getElementById('previousPatientBox').style.display='none';
+  document.getElementById('previousVisitsBody').innerHTML='';
+}
+
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('./service-worker.js').catch(()=>{}));
+}
+
+const WM_DB='WoundMeasureOfflineDB', WM_STORE='records';
+
+function openWMDB(){
+  return new Promise((resolve,reject)=>{
+    const req=indexedDB.open(WM_DB,1);
+    req.onupgradeneeded=()=>{
+      const db=req.result;
+      if(!db.objectStoreNames.contains(WM_STORE)){
+        const s=db.createObjectStore(WM_STORE,{keyPath:'id'});
+        s.createIndex('synced','synced',{unique:false});
+        s.createIndex('saved_at','saved_at',{unique:false});
+      }
+    };
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function dbPut(record){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readwrite');
+    tx.objectStore(WM_STORE).put(record);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+async function dbAll(){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readonly');
+    const req=tx.objectStore(WM_STORE).getAll();
+    req.onsuccess=()=>resolve(req.result||[]);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function dbDelete(id){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readwrite');
+    tx.objectStore(WM_STORE).delete(id);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+function offlineCollectData(){
+  if(typeof collectAppData==='function'){
+    const d=collectAppData(true);
+    d.images=d.images||{};
+    try{
+      if(S[1]&&S[1].img&&S[1].img.src&&S[1].img.src.startsWith('data:image'))d.images.baseline=S[1].img.src;
+      if(S[2]&&S[2].img&&S[2].img.src&&S[2].img.src.startsWith('data:image'))d.images.followup=S[2].img.src;
+    }catch(e){}
+    return d;
+  }
+  return {saved_at:new Date().toISOString()};
+}
+async function saveOfflineRecord(){
+  const s=document.getElementById('offlineStatus');
+  try{
+    const id='WM-'+Date.now();
+    await dbPut({id,saved_at:new Date().toISOString(),synced:false,data:offlineCollectData()});
+    s.textContent='Saved on this device for offline use.';
+    s.className='successbox small';
+    showOfflineRecords();
+  }catch(e){
+    s.textContent='Offline save failed: '+e.message;
+    s.className='errorbox small';
+  }
+}
+async function showOfflineRecords(){
+  const list=document.getElementById('offlineList');
+  const rows=(await dbAll()).sort((a,b)=>String(b.saved_at).localeCompare(String(a.saved_at)));
+  if(!rows.length){list.innerHTML='<div class="small">No offline records stored.</div>';return;}
+  list.innerHTML=rows.map(r=>{
+    const p=(r.data&&r.data.patient)||{};
+    const name=((p.first_name||'')+' '+(p.last_name||'')).trim()||p.patient_id||p.mrn||'Unnamed';
+    return `<div class="kpi" style="margin-bottom:8px"><b>${name}</b><br><span class="small">${new Date(r.saved_at).toLocaleString()} · ${r.synced?'Synced':'Pending sync'}</span><div class="toolbar"><button class="secondary" onclick="deleteOfflineRecord('${r.id}')">Delete</button></div></div>`;
+  }).join('');
+}
+async function deleteOfflineRecord(id){await dbDelete(id);showOfflineRecords();}
+async function syncOfflineRecords(){
+  const s=document.getElementById('offlineStatus');
+  if(!navigator.onLine){s.textContent='No internet connection. Records stay on this device.';s.className='errorbox small';return;}
+  const endpoint=(document.getElementById('driveEndpoint')||{}).value||'';
+  if(!endpoint.trim()){s.textContent='Enter your Google Apps Script URL first.';s.className='errorbox small';return;}
+  const rows=await dbAll(); let ok=0,fail=0;
+  for(const r of rows.filter(x=>!x.synced)){
+    try{
+      r.data.drive_root_folder=((document.getElementById('driveFolder')||{}).value)||'WoundMeasure';
+      const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(r.data)});
+      const t=await res.text(); let j={}; try{j=JSON.parse(t)}catch(e){}
+      if(!res.ok||j.ok===false)throw new Error(j.error||'Sync failed');
+      r.synced=true;r.synced_at=new Date().toISOString();await dbPut(r);ok++;
+    }catch(e){fail++;}
+  }
+  s.textContent=`Sync complete: ${ok} synced, ${fail} failed.`;
+  s.className=fail?'errorbox small':'successbox small';
+  showOfflineRecords();
+}
+window.addEventListener('online',()=>{const s=document.getElementById('offlineStatus');if(s){s.textContent='Internet restored. You can sync pending records.';s.className='successbox small';}});
+window.addEventListener('offline',()=>{const s=document.getElementById('offlineStatus');if(s){s.textContent='Offline mode active.';s.className='status small';}});
+
+</script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js">
+const tbsaSets={
+ adult:[
+  ['Head anterior',4.5],['Head posterior',4.5],['Anterior trunk',18],['Posterior trunk',18],
+  ['Right arm anterior',4.5],['Right arm posterior',4.5],['Left arm anterior',4.5],['Left arm posterior',4.5],
+  ['Right leg anterior',9],['Right leg posterior',9],['Left leg anterior',9],['Left leg posterior',9],['Perineum',1]
+ ],
+ child:[
+  ['Head anterior',9],['Head posterior',9],['Anterior trunk',18],['Posterior trunk',18],
+  ['Right arm anterior',4.5],['Right arm posterior',4.5],['Left arm anterior',4.5],['Left arm posterior',4.5],
+  ['Right leg anterior',7],['Right leg posterior',7],['Left leg anterior',7],['Left leg posterior',7],['Perineum',1]
+ ]
+};
+let tbsaSelected=new Set();
+let currentTBSA=0;
+
+function renderTBSA(){
+  const box=document.getElementById('tbsaRegions'); if(!box)return;
+  tbsaSelected.clear(); box.innerHTML='';
+  const rows=tbsaSets[document.getElementById('tbsaAge').value];
+  rows.forEach((r,i)=>{
+    const b=document.createElement('button');
+    b.type='button'; b.className='secondary'; b.style.textAlign='left';
+    b.innerHTML=`${r[0]} <span class="small">(${r[1]}%)</span>`;
+    b.onclick=()=>{
+      if(tbsaSelected.has(i)){tbsaSelected.delete(i);b.style.outline='';}
+      else{tbsaSelected.add(i);b.style.outline='3px solid #2563eb';}
+      calcTBSA();
+    };
+    box.appendChild(b);
+  });
+  calcTBSA();
+}
+function calcTBSA(){
+  if(!document.getElementById('tbsaAge'))return;
+  const rows=tbsaSets[document.getElementById('tbsaAge').value];
+  let total=Math.max(0,parseFloat(document.getElementById('tbsaPalm').value)||0), parts=[];
+  tbsaSelected.forEach(i=>{total+=rows[i][1];parts.push(`${rows[i][0]} ${rows[i][1]}%`);});
+  currentTBSA=Math.min(100,total);
+  document.getElementById('tbsaTotal').textContent=currentTBSA.toFixed(currentTBSA%1?1:0)+'%';
+  document.getElementById('tbsaBreakdown').textContent=parts.length?parts.join(' · '):'No regions selected.';
+  depthTBSA();
+}
+function depthTBSA(){
+  if(!document.getElementById('tbsaPartial'))return;
+  const p=Math.max(0,parseFloat(document.getElementById('tbsaPartial').value)||0);
+  const f=Math.max(0,parseFloat(document.getElementById('tbsaFull').value)||0);
+  document.getElementById('tbsaPartialOut').textContent=p?p.toFixed(1)+'%':'—';
+  document.getElementById('tbsaFullOut').textContent=f?f.toFixed(1)+'%':'—';
+}
+function resetTBSA(){
+  document.getElementById('tbsaPalm').value=0;
+  document.getElementById('tbsaPartial').value=0;
+  document.getElementById('tbsaFull').value=0;
+  renderTBSA();
+}
+
+
+function val(id){
+  const el=document.getElementById(id);
+  return el ? (el.value!==undefined ? el.value : el.textContent) : '';
+}
+function numberOrBlank(x){
+  return (x===null || x===undefined || Number.isNaN(x)) ? '' : Number(x);
+}
+function collectAppData(includeIdentifiers=true){
+  const a1=S && S[1] ? S[1].area : null;
+  const a2=S && S[2] ? S[2].area : null;
+  const g1=S && S[1] ? S[1].granArea : null;
+  const g2=S && S[2] ? S[2].granArea : null;
+  const gp1=S && S[1] ? S[1].granPct : null;
+  const gp2=S && S[2] ? S[2].granPct : null;
+  const par=(a1&&a2)?((a1-a2)/a1*100):null;
+  const d=typeof daysBetween==='function'?daysBetween():null;
+  const rate=(a1&&a2&&d&&d>0)?((a1-a2)/d*7):null;
+
+  const patientId = val('patientId') || (includeIdentifiers ? ((val('firstName')+' '+val('lastName')).trim()) : ('R-'+Date.now().toString().slice(-8)));
+
+  const data={
+    exported_at:new Date().toISOString(),
+    patient:{
+      patient_id:patientId,
+      first_name:includeIdentifiers?val('firstName'):'',
+      last_name:includeIdentifiers?val('lastName'):'',
+      national_id:includeIdentifiers?val('nationalId'):'',
+      age:val('patientAge'),
+      sex:val('patientSex'),
+      admission_date:val('admissionDate'),
+      phone:includeIdentifiers?val('phone'):'',
+      mrn:includeIdentifiers?val('mrn'):'',
+      hospital:val('hospital')
+    },
+    wound:{
+      location:val('location'),
+      type:val('woundType'),
+      procedure:val('procedure')
+    },
+    baseline:{
+      date:val('date1'),
+      wound_area_cm2:numberOrBlank(a1),
+      granulation_area_cm2:numberOrBlank(g1),
+      granulation_percent:numberOrBlank(gp1)
+    },
+    followup:{
+      date:val('date2'),
+      wound_area_cm2:numberOrBlank(a2),
+      granulation_area_cm2:numberOrBlank(g2),
+      granulation_percent:numberOrBlank(gp2)
+    },
+    comparison:{
+      wound_area_reduction_percent:numberOrBlank(par),
+      healing_rate_cm2_week:numberOrBlank(rate)
+    },
+    tissue:{
+      granulation_percent:val('gran'),
+      slough_percent:val('slough'),
+      necrosis_percent:val('necrosis'),
+      epithelialization_percent:val('epi'),
+      periwound:val('peri'),
+      exudate:val('exudate')
+    },
+    burn:{
+      day_since_burn:val('burnDay'),
+      mechanism:val('burnMechanism'),
+      clinician_impression:val('burnClinician'),
+      color:val('burnColor'),
+      surface:val('burnSurface'),
+      blanching:val('burnBlanch'),
+      pain:val('burnPain'),
+      sensation:val('burnSensation'),
+      texture:val('burnTexture'),
+      tbsa_percent:(typeof currentTBSA!=='undefined'?currentTBSA:''),
+      partial_thickness_tbsa:val('tbsaPartial'),
+      full_thickness_tbsa:val('tbsaFull')
+    },
+    notes:{
+      clinical:val('notes'),
+      generated:val('generated')
+    }
+  };
+  return data;
+}
+function safeFilename(){
+  const mrn=val('mrn') || val('patientId') || 'patient';
+  const date=val('date2') || val('date1') || new Date().toISOString().slice(0,10);
+  return (`WoundMeasure_${mrn}_${date}`).replace(/[^\w\-]+/g,'_');
+}
+function rowsForReport(d){
+  return [
+    ['Patient ID',d.patient.patient_id],['Name',`${d.patient.first_name} ${d.patient.last_name}`.trim()],
+    ['MRN',d.patient.mrn],['Hospital',d.patient.hospital],['Admission date',d.patient.admission_date],
+    ['Wound location',d.wound.location],['Wound type',d.wound.type],['Procedure',d.wound.procedure],
+    ['Baseline date',d.baseline.date],['Baseline wound area (cm²)',d.baseline.wound_area_cm2],
+    ['Baseline granulation area (cm²)',d.baseline.granulation_area_cm2],['Baseline granulation (%)',d.baseline.granulation_percent],
+    ['Follow-up date',d.followup.date],['Follow-up wound area (cm²)',d.followup.wound_area_cm2],
+    ['Follow-up granulation area (cm²)',d.followup.granulation_area_cm2],['Follow-up granulation (%)',d.followup.granulation_percent],
+    ['Wound area reduction (%)',d.comparison.wound_area_reduction_percent],['Healing rate (cm²/week)',d.comparison.healing_rate_cm2_week],
+    ['Burn TBSA (%)',d.burn.tbsa_percent],['Partial-thickness TBSA (%)',d.burn.partial_thickness_tbsa],
+    ['Full-thickness TBSA (%)',d.burn.full_thickness_tbsa]
+  ];
+}
+function exportExcel(){
+  if(typeof XLSX==='undefined'){alert('Excel library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const summary=rowsForReport(d).map(r=>({Parameter:r[0],Value:r[1]}));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(summary),'Summary');
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet([{
+    patient_id:d.patient.patient_id, first_name:d.patient.first_name,last_name:d.patient.last_name,national_id:d.patient.national_id,
+    age:d.patient.age,sex:d.patient.sex,phone:d.patient.phone,mrn:d.patient.mrn,hospital:d.patient.hospital,admission_date:d.patient.admission_date,
+    wound_location:d.wound.location,wound_type:d.wound.type,procedure:d.wound.procedure,
+    baseline_date:d.baseline.date,baseline_area_cm2:d.baseline.wound_area_cm2,baseline_granulation_cm2:d.baseline.granulation_area_cm2,baseline_granulation_pct:d.baseline.granulation_percent,
+    followup_date:d.followup.date,followup_area_cm2:d.followup.wound_area_cm2,followup_granulation_cm2:d.followup.granulation_area_cm2,followup_granulation_pct:d.followup.granulation_percent,
+    wound_area_reduction_pct:d.comparison.wound_area_reduction_percent,healing_rate_cm2_week:d.comparison.healing_rate_cm2_week,
+    tbsa_pct:d.burn.tbsa_percent,partial_tbsa_pct:d.burn.partial_thickness_tbsa,full_tbsa_pct:d.burn.full_thickness_tbsa
+  }]),'Research Data');
+  XLSX.writeFile(wb,safeFilename()+'.xlsx');
+}
+function exportResearchExcel(){
+  if(typeof XLSX==='undefined'){alert('Excel library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(false);
+  const row={
+    research_patient_id:d.patient.patient_id,age:d.patient.age,sex:d.patient.sex,hospital:d.patient.hospital,admission_date:d.patient.admission_date,
+    wound_location:d.wound.location,wound_type:d.wound.type,procedure:d.wound.procedure,
+    baseline_date:d.baseline.date,baseline_area_cm2:d.baseline.wound_area_cm2,baseline_granulation_cm2:d.baseline.granulation_area_cm2,baseline_granulation_pct:d.baseline.granulation_percent,
+    followup_date:d.followup.date,followup_area_cm2:d.followup.wound_area_cm2,followup_granulation_cm2:d.followup.granulation_area_cm2,followup_granulation_pct:d.followup.granulation_percent,
+    wound_area_reduction_pct:d.comparison.wound_area_reduction_percent,healing_rate_cm2_week:d.comparison.healing_rate_cm2_week,
+    tbsa_pct:d.burn.tbsa_percent,partial_tbsa_pct:d.burn.partial_thickness_tbsa,full_tbsa_pct:d.burn.full_thickness_tbsa
+  };
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet([row]),'Anonymized Research');
+  XLSX.writeFile(wb,'Research_'+new Date().toISOString().slice(0,10)+'.xlsx');
+}
+async function exportPDF(){
+  if(!window.jspdf){alert('PDF library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const {jsPDF}=window.jspdf;
+  const pdf=new jsPDF({unit:'mm',format:'a4'});
+  let y=15;
+  pdf.setFontSize(16); pdf.text('WoundMeasure Clinical Report',14,y); y+=9;
+  pdf.setFontSize(9); pdf.text('Generated: '+new Date().toLocaleString(),14,y); y+=8;
+  pdf.setFontSize(10);
+  for(const [k,v] of rowsForReport(d)){
+    const line=`${k}: ${v===null||v===undefined||v===''?'—':v}`;
+    const lines=pdf.splitTextToSize(line,180);
+    if(y+lines.length*5>282){pdf.addPage();y=15;}
+    pdf.text(lines,14,y); y+=lines.length*5+1;
+  }
+  const notes=(d.notes.generated||d.notes.clinical||'').trim();
+  if(notes){
+    y+=4; if(y>250){pdf.addPage();y=15;}
+    pdf.setFontSize(12);pdf.text('Clinical note',14,y);y+=6;pdf.setFontSize(9);
+    const lines=pdf.splitTextToSize(notes,180);
+    for(const ln of lines){if(y>282){pdf.addPage();y=15;}pdf.text(ln,14,y);y+=4.5;}
+  }
+  // Add images when available
+  for(const item of [[1,'Baseline photograph'],[2,'Follow-up photograph']]){
+    const s=S[item[0]];
+    if(s && s.img && s.img.src && s.img.src.startsWith('data:image')){
+      pdf.addPage();pdf.setFontSize(12);pdf.text(item[1],14,15);
+      try{pdf.addImage(s.img.src,'JPEG',14,22,180,135,undefined,'FAST');}catch(e){}
+    }
+  }
+  pdf.save(safeFilename()+'.pdf');
+}
+async function exportWord(){
+  if(typeof docx==='undefined'){alert('Word library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const {Document,Packer,Paragraph,TextRun,Table,TableRow,TableCell,WidthType,HeadingLevel}=docx;
+  const tableRows=rowsForReport(d).map(([k,v])=>new TableRow({children:[
+    new TableCell({children:[new Paragraph({children:[new TextRun({text:String(k),bold:true})]})]}),
+    new TableCell({children:[new Paragraph(String(v===null||v===undefined||v===''?'—':v))]})
+  ]}));
+  const children=[
+    new Paragraph({text:'WoundMeasure Clinical Report',heading:HeadingLevel.TITLE}),
+    new Paragraph('Generated: '+new Date().toLocaleString()),
+    new Table({rows:tableRows,width:{size:100,type:WidthType.PERCENTAGE}}),
+    new Paragraph({text:'Clinical note',heading:HeadingLevel.HEADING_2}),
+    new Paragraph(d.notes.generated||d.notes.clinical||'—')
+  ];
+  const documentFile=new Document({sections:[{children}]});
+  const blob=await Packer.toBlob(documentFile);
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=safeFilename()+'.docx';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+function saveDriveSettings(){
+  localStorage.setItem('woundmeasure_drive_endpoint',val('driveEndpoint'));
+  localStorage.setItem('woundmeasure_drive_folder',val('driveFolder'));
+  const s=document.getElementById('driveStatus');s.className='successbox small';s.textContent='Drive settings saved on this device.';
+}
+function loadDriveSettings(){
+  const e=localStorage.getItem('woundmeasure_drive_endpoint');const f=localStorage.getItem('woundmeasure_drive_folder');
+  if(e&&document.getElementById('driveEndpoint'))document.getElementById('driveEndpoint').value=e;
+  if(f&&document.getElementById('driveFolder'))document.getElementById('driveFolder').value=f;
+}
+async function saveToGoogleDrive(){
+  const endpoint=val('driveEndpoint').trim();
+  const status=document.getElementById('driveStatus');
+  if(!endpoint){status.className='errorbox small';status.textContent='Enter your deployed Google Apps Script Web App URL first.';return;}
+  const payload=collectAppData(true);
+  payload.drive_root_folder=val('driveFolder')||'WoundMeasure';
+  // include current photos if they are browser data URLs
+  payload.images={};
+  if(S[1]&&S[1].img&&S[1].img.src&&S[1].img.src.startsWith('data:image'))payload.images.baseline=S[1].img.src;
+  if(S[2]&&S[2].img&&S[2].img.src&&S[2].img.src.startsWith('data:image'))payload.images.followup=S[2].img.src;
+  status.className='status small';status.textContent='Saving to Google Drive…';
+  try{
+    const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});
+    const txt=await res.text();
+    let result={};try{result=JSON.parse(txt);}catch(e){result={ok:res.ok,message:txt};}
+    if(!res.ok || result.ok===false)throw new Error(result.error||result.message||'Save failed');
+    status.className='successbox small';
+    status.innerHTML=`Saved to Google Drive.${result.folder_url?` <a href="${result.folder_url}" target="_blank">Open patient folder</a>`:''}`;
+  }catch(err){
+    status.className='errorbox small';
+    status.textContent='Google Drive save failed: '+err.message;
+  }
+}
+document.addEventListener('DOMContentLoaded',()=>{loadDriveSettings(); if(document.getElementById('tbsaRegions'))renderTBSA();});
+
+
+let previousPatientResults=[];
+
+function driveEndpoint(){
+  const el=document.getElementById('driveEndpoint');
+  return el ? el.value.trim() : '';
+}
+
+async function searchPreviousPatient(){
+  const endpoint=driveEndpoint();
+  const key=(document.getElementById('searchPatientKey').value||'').trim();
+  const status=document.getElementById('patientSearchStatus');
+  const box=document.getElementById('previousPatientBox');
+
+  if(!endpoint){
+    status.className='errorbox small';
+    status.textContent='Configure your Google Apps Script Web App URL in the Google Drive section first.';
+    return;
+  }
+  if(!key){
+    status.className='errorbox small';
+    status.textContent='Enter an MRN or Patient ID.';
+    return;
+  }
+
+  status.className='status small';
+  status.textContent='Searching Google Drive…';
+  box.style.display='none';
+
+  try{
+    const url=endpoint + (endpoint.includes('?')?'&':'?') +
+      'action=searchPatient&key=' + encodeURIComponent(key) +
+      '&root=' + encodeURIComponent(val('driveFolder')||'WoundMeasure');
+
+    const res=await fetch(url,{method:'GET'});
+    const txt=await res.text();
+    let data={};
+    try{data=JSON.parse(txt);}catch(e){throw new Error(txt||'Invalid server response');}
+    if(!res.ok || data.ok===false) throw new Error(data.error||'Search failed');
+    if(!data.found){
+      previousPatientResults=[];
+      status.className='status small';
+      status.textContent='No patient folder or assessment was found for this MRN/Patient ID.';
+      return;
+    }
+
+    previousPatientResults=data.assessments||[];
+    const p=data.patient||{};
+    document.getElementById('previousPatientTitle').textContent=
+      ((p.first_name||'')+' '+(p.last_name||'')).trim() || p.patient_id || p.mrn || key;
+    document.getElementById('previousPatientMeta').textContent=
+      `MRN: ${p.mrn||'—'} · Patient ID: ${p.patient_id||'—'} · Hospital: ${p.hospital||'—'} · Assessments: ${previousPatientResults.length}`;
+
+    const body=document.getElementById('previousVisitsBody');
+    body.innerHTML='';
+    previousPatientResults.forEach((a,i)=>{
+      const tr=document.createElement('tr');
+      const gran=(a.followup && a.followup.granulation_percent!=='' && a.followup.granulation_percent!=null)
+        ? Number(a.followup.granulation_percent).toFixed(1)+'%' : '—';
+      const area=(a.followup && a.followup.wound_area_cm2!=='' && a.followup.wound_area_cm2!=null)
+        ? Number(a.followup.wound_area_cm2).toFixed(2)+' cm²'
+        : (a.baseline && a.baseline.wound_area_cm2!=='' && a.baseline.wound_area_cm2!=null)
+          ? Number(a.baseline.wound_area_cm2).toFixed(2)+' cm²' : '—';
+      const tbsa=(a.burn && a.burn.tbsa_percent!=='' && a.burn.tbsa_percent!=null)
+        ? Number(a.burn.tbsa_percent).toFixed(1)+'%' : '—';
+      const date=(a.followup&&a.followup.date)||(a.baseline&&a.baseline.date)||a.exported_at||'—';
+      const wound=(a.wound&&a.wound.location)||'—';
+
+      tr.innerHTML=`
+        <td>${escapeHtml(String(date))}</td>
+        <td>${escapeHtml(String(wound))}</td>
+        <td>${escapeHtml(String(area))}</td>
+        <td>${escapeHtml(String(gran))}</td>
+        <td>${escapeHtml(String(tbsa))}</td>
+        <td>
+          <button class="secondary" onclick="openPreviousAssessment(${i})">Open</button>
+          ${a.latest_photo_url ? `<button class="ghost" onclick="loadPreviousPhotoAsGhost(${i})">Ghost</button>` : ''}
+        </td>`;
+      body.appendChild(tr);
+    });
+
+    status.className='successbox small';
+    status.textContent='Patient found. Select a previous assessment.';
+    box.style.display='block';
+  }catch(err){
+    status.className='errorbox small';
+    status.textContent='Search failed: '+err.message;
+  }
+}
+
+function escapeHtml(s){
+  return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+}
+
+function setField(id,value){
+  const el=document.getElementById(id);
+  if(el && value!==undefined && value!==null) el.value=value;
+}
+
+function openPreviousAssessment(i){
+  const d=previousPatientResults[i];
+  if(!d)return;
+  const p=d.patient||{}, w=d.wound||{}, b=d.burn||{}, t=d.tissue||{}, n=d.notes||{};
+
+  setField('patientId',p.patient_id||'');
+  setField('firstName',p.first_name||'');
+  setField('lastName',p.last_name||'');
+  setField('nationalId',p.national_id||'');
+  setField('patientAge',p.age||'');
+  setField('patientSex',p.sex||'');
+  setField('admissionDate',p.admission_date||'');
+  setField('phone',p.phone||'');
+  setField('mrn',p.mrn||'');
+  setField('hospital',p.hospital||'');
+
+  setField('location',w.location||'');
+  setField('woundType',w.type||'');
+  setField('procedure',w.procedure||'');
+
+  setField('date1',(d.followup&&d.followup.date)||(d.baseline&&d.baseline.date)||'');
+  setField('gran',t.granulation_percent||'');
+  setField('slough',t.slough_percent||'');
+  setField('necrosis',t.necrosis_percent||'');
+  setField('epi',t.epithelialization_percent||'');
+  setField('peri',t.periwound||'');
+  setField('exudate',t.exudate||'');
+  setField('notes',n.clinical||'');
+  setField('generated',n.generated||'');
+
+  setField('burnDay',b.day_since_burn||'');
+  setField('burnMechanism',b.mechanism||'');
+  setField('burnClinician',b.clinician_impression||'');
+  setField('burnColor',b.color||'');
+  setField('burnSurface',b.surface||'');
+  setField('burnBlanch',b.blanching||'');
+  setField('burnPain',b.pain||'');
+  setField('burnSensation',b.sensation||'');
+  setField('burnTexture',b.texture||'');
+
+  // Restore numeric previous visit values for comparison.
+  const srcVisit=(d.followup && d.followup.wound_area_cm2!=='' && d.followup.wound_area_cm2!=null) ? d.followup : d.baseline;
+  if(typeof S!=='undefined' && S[1]){
+    S[1].area=srcVisit && srcVisit.wound_area_cm2!=='' ? Number(srcVisit.wound_area_cm2) : null;
+    S[1].granArea=srcVisit && srcVisit.granulation_area_cm2!=='' ? Number(srcVisit.granulation_area_cm2) : null;
+    S[1].granPct=srcVisit && srcVisit.granulation_percent!=='' ? Number(srcVisit.granulation_percent) : null;
+    const area1=document.getElementById('area1');
+    if(area1)area1.textContent=S[1].area!=null?S[1].area.toFixed(2)+' cm²':'—';
+    const ga1=document.getElementById('granArea1');
+    if(ga1)ga1.textContent=S[1].granArea!=null?S[1].granArea.toFixed(2)+' cm²':'—';
+    const gp1=document.getElementById('granPct1');
+    if(gp1)gp1.textContent=S[1].granPct!=null?S[1].granPct.toFixed(1)+'%':'—';
+  }
+
+  if(typeof compare==='function') compare();
+
+  document.getElementById('patientSearchStatus').className='successbox small';
+  document.getElementById('patientSearchStatus').textContent='Previous assessment loaded into the form. You can now take the new follow-up photograph.';
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+async function loadPreviousPhotoAsGhost(i){
+  const d=previousPatientResults[i];
+  if(!d || !d.latest_photo_url){
+    alert('No previous photograph is available for this assessment.');
+    return;
+  }
+  try{
+    const res=await fetch(d.latest_photo_url);
+    if(!res.ok)throw new Error('Photo download failed');
+    const payload=await res.json();
+    if(!payload.ok || !payload.data_url)throw new Error(payload.error||'No image returned');
+    const dataUrl=payload.data_url;
+    {
+      const ghost=document.getElementById('ghostImage');
+      if(ghost)ghost.src=dataUrl;
+
+      const img=new Image();
+      img.onload=()=>{
+        if(typeof S!=='undefined' && S[1]){
+          S[1].img=img;
+          if(typeof redraw==='function') redraw(1);
+        }
+      };
+      img.src=dataUrl;
+
+      document.getElementById('patientSearchStatus').className='successbox small';
+      document.getElementById('patientSearchStatus').textContent='Previous photograph loaded as Ghost Overlay. Open the camera and align the current wound.';
+    }
+  }catch(err){
+    document.getElementById('patientSearchStatus').className='errorbox small';
+    document.getElementById('patientSearchStatus').textContent='Could not load previous photograph: '+err.message;
+  }
+}
+
+function clearPatientSearch(){
+  previousPatientResults=[];
+  document.getElementById('searchPatientKey').value='';
+  document.getElementById('patientSearchStatus').className='status small';
+  document.getElementById('patientSearchStatus').textContent='Enter MRN or Patient ID.';
+  document.getElementById('previousPatientBox').style.display='none';
+  document.getElementById('previousVisitsBody').innerHTML='';
+}
+
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('./service-worker.js').catch(()=>{}));
+}
+
+const WM_DB='WoundMeasureOfflineDB', WM_STORE='records';
+
+function openWMDB(){
+  return new Promise((resolve,reject)=>{
+    const req=indexedDB.open(WM_DB,1);
+    req.onupgradeneeded=()=>{
+      const db=req.result;
+      if(!db.objectStoreNames.contains(WM_STORE)){
+        const s=db.createObjectStore(WM_STORE,{keyPath:'id'});
+        s.createIndex('synced','synced',{unique:false});
+        s.createIndex('saved_at','saved_at',{unique:false});
+      }
+    };
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function dbPut(record){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readwrite');
+    tx.objectStore(WM_STORE).put(record);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+async function dbAll(){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readonly');
+    const req=tx.objectStore(WM_STORE).getAll();
+    req.onsuccess=()=>resolve(req.result||[]);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function dbDelete(id){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readwrite');
+    tx.objectStore(WM_STORE).delete(id);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+function offlineCollectData(){
+  if(typeof collectAppData==='function'){
+    const d=collectAppData(true);
+    d.images=d.images||{};
+    try{
+      if(S[1]&&S[1].img&&S[1].img.src&&S[1].img.src.startsWith('data:image'))d.images.baseline=S[1].img.src;
+      if(S[2]&&S[2].img&&S[2].img.src&&S[2].img.src.startsWith('data:image'))d.images.followup=S[2].img.src;
+    }catch(e){}
+    return d;
+  }
+  return {saved_at:new Date().toISOString()};
+}
+async function saveOfflineRecord(){
+  const s=document.getElementById('offlineStatus');
+  try{
+    const id='WM-'+Date.now();
+    await dbPut({id,saved_at:new Date().toISOString(),synced:false,data:offlineCollectData()});
+    s.textContent='Saved on this device for offline use.';
+    s.className='successbox small';
+    showOfflineRecords();
+  }catch(e){
+    s.textContent='Offline save failed: '+e.message;
+    s.className='errorbox small';
+  }
+}
+async function showOfflineRecords(){
+  const list=document.getElementById('offlineList');
+  const rows=(await dbAll()).sort((a,b)=>String(b.saved_at).localeCompare(String(a.saved_at)));
+  if(!rows.length){list.innerHTML='<div class="small">No offline records stored.</div>';return;}
+  list.innerHTML=rows.map(r=>{
+    const p=(r.data&&r.data.patient)||{};
+    const name=((p.first_name||'')+' '+(p.last_name||'')).trim()||p.patient_id||p.mrn||'Unnamed';
+    return `<div class="kpi" style="margin-bottom:8px"><b>${name}</b><br><span class="small">${new Date(r.saved_at).toLocaleString()} · ${r.synced?'Synced':'Pending sync'}</span><div class="toolbar"><button class="secondary" onclick="deleteOfflineRecord('${r.id}')">Delete</button></div></div>`;
+  }).join('');
+}
+async function deleteOfflineRecord(id){await dbDelete(id);showOfflineRecords();}
+async function syncOfflineRecords(){
+  const s=document.getElementById('offlineStatus');
+  if(!navigator.onLine){s.textContent='No internet connection. Records stay on this device.';s.className='errorbox small';return;}
+  const endpoint=(document.getElementById('driveEndpoint')||{}).value||'';
+  if(!endpoint.trim()){s.textContent='Enter your Google Apps Script URL first.';s.className='errorbox small';return;}
+  const rows=await dbAll(); let ok=0,fail=0;
+  for(const r of rows.filter(x=>!x.synced)){
+    try{
+      r.data.drive_root_folder=((document.getElementById('driveFolder')||{}).value)||'WoundMeasure';
+      const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(r.data)});
+      const t=await res.text(); let j={}; try{j=JSON.parse(t)}catch(e){}
+      if(!res.ok||j.ok===false)throw new Error(j.error||'Sync failed');
+      r.synced=true;r.synced_at=new Date().toISOString();await dbPut(r);ok++;
+    }catch(e){fail++;}
+  }
+  s.textContent=`Sync complete: ${ok} synced, ${fail} failed.`;
+  s.className=fail?'errorbox small':'successbox small';
+  showOfflineRecords();
+}
+window.addEventListener('online',()=>{const s=document.getElementById('offlineStatus');if(s){s.textContent='Internet restored. You can sync pending records.';s.className='successbox small';}});
+window.addEventListener('offline',()=>{const s=document.getElementById('offlineStatus');if(s){s.textContent='Offline mode active.';s.className='status small';}});
+
+</script>
+<script src="https://unpkg.com/docx@8.5.0/build/index.umd.js">
+const tbsaSets={
+ adult:[
+  ['Head anterior',4.5],['Head posterior',4.5],['Anterior trunk',18],['Posterior trunk',18],
+  ['Right arm anterior',4.5],['Right arm posterior',4.5],['Left arm anterior',4.5],['Left arm posterior',4.5],
+  ['Right leg anterior',9],['Right leg posterior',9],['Left leg anterior',9],['Left leg posterior',9],['Perineum',1]
+ ],
+ child:[
+  ['Head anterior',9],['Head posterior',9],['Anterior trunk',18],['Posterior trunk',18],
+  ['Right arm anterior',4.5],['Right arm posterior',4.5],['Left arm anterior',4.5],['Left arm posterior',4.5],
+  ['Right leg anterior',7],['Right leg posterior',7],['Left leg anterior',7],['Left leg posterior',7],['Perineum',1]
+ ]
+};
+let tbsaSelected=new Set();
+let currentTBSA=0;
+
+function renderTBSA(){
+  const box=document.getElementById('tbsaRegions'); if(!box)return;
+  tbsaSelected.clear(); box.innerHTML='';
+  const rows=tbsaSets[document.getElementById('tbsaAge').value];
+  rows.forEach((r,i)=>{
+    const b=document.createElement('button');
+    b.type='button'; b.className='secondary'; b.style.textAlign='left';
+    b.innerHTML=`${r[0]} <span class="small">(${r[1]}%)</span>`;
+    b.onclick=()=>{
+      if(tbsaSelected.has(i)){tbsaSelected.delete(i);b.style.outline='';}
+      else{tbsaSelected.add(i);b.style.outline='3px solid #2563eb';}
+      calcTBSA();
+    };
+    box.appendChild(b);
+  });
+  calcTBSA();
+}
+function calcTBSA(){
+  if(!document.getElementById('tbsaAge'))return;
+  const rows=tbsaSets[document.getElementById('tbsaAge').value];
+  let total=Math.max(0,parseFloat(document.getElementById('tbsaPalm').value)||0), parts=[];
+  tbsaSelected.forEach(i=>{total+=rows[i][1];parts.push(`${rows[i][0]} ${rows[i][1]}%`);});
+  currentTBSA=Math.min(100,total);
+  document.getElementById('tbsaTotal').textContent=currentTBSA.toFixed(currentTBSA%1?1:0)+'%';
+  document.getElementById('tbsaBreakdown').textContent=parts.length?parts.join(' · '):'No regions selected.';
+  depthTBSA();
+}
+function depthTBSA(){
+  if(!document.getElementById('tbsaPartial'))return;
+  const p=Math.max(0,parseFloat(document.getElementById('tbsaPartial').value)||0);
+  const f=Math.max(0,parseFloat(document.getElementById('tbsaFull').value)||0);
+  document.getElementById('tbsaPartialOut').textContent=p?p.toFixed(1)+'%':'—';
+  document.getElementById('tbsaFullOut').textContent=f?f.toFixed(1)+'%':'—';
+}
+function resetTBSA(){
+  document.getElementById('tbsaPalm').value=0;
+  document.getElementById('tbsaPartial').value=0;
+  document.getElementById('tbsaFull').value=0;
+  renderTBSA();
+}
+
+
+function val(id){
+  const el=document.getElementById(id);
+  return el ? (el.value!==undefined ? el.value : el.textContent) : '';
+}
+function numberOrBlank(x){
+  return (x===null || x===undefined || Number.isNaN(x)) ? '' : Number(x);
+}
+function collectAppData(includeIdentifiers=true){
+  const a1=S && S[1] ? S[1].area : null;
+  const a2=S && S[2] ? S[2].area : null;
+  const g1=S && S[1] ? S[1].granArea : null;
+  const g2=S && S[2] ? S[2].granArea : null;
+  const gp1=S && S[1] ? S[1].granPct : null;
+  const gp2=S && S[2] ? S[2].granPct : null;
+  const par=(a1&&a2)?((a1-a2)/a1*100):null;
+  const d=typeof daysBetween==='function'?daysBetween():null;
+  const rate=(a1&&a2&&d&&d>0)?((a1-a2)/d*7):null;
+
+  const patientId = val('patientId') || (includeIdentifiers ? ((val('firstName')+' '+val('lastName')).trim()) : ('R-'+Date.now().toString().slice(-8)));
+
+  const data={
+    exported_at:new Date().toISOString(),
+    patient:{
+      patient_id:patientId,
+      first_name:includeIdentifiers?val('firstName'):'',
+      last_name:includeIdentifiers?val('lastName'):'',
+      national_id:includeIdentifiers?val('nationalId'):'',
+      age:val('patientAge'),
+      sex:val('patientSex'),
+      admission_date:val('admissionDate'),
+      phone:includeIdentifiers?val('phone'):'',
+      mrn:includeIdentifiers?val('mrn'):'',
+      hospital:val('hospital')
+    },
+    wound:{
+      location:val('location'),
+      type:val('woundType'),
+      procedure:val('procedure')
+    },
+    baseline:{
+      date:val('date1'),
+      wound_area_cm2:numberOrBlank(a1),
+      granulation_area_cm2:numberOrBlank(g1),
+      granulation_percent:numberOrBlank(gp1)
+    },
+    followup:{
+      date:val('date2'),
+      wound_area_cm2:numberOrBlank(a2),
+      granulation_area_cm2:numberOrBlank(g2),
+      granulation_percent:numberOrBlank(gp2)
+    },
+    comparison:{
+      wound_area_reduction_percent:numberOrBlank(par),
+      healing_rate_cm2_week:numberOrBlank(rate)
+    },
+    tissue:{
+      granulation_percent:val('gran'),
+      slough_percent:val('slough'),
+      necrosis_percent:val('necrosis'),
+      epithelialization_percent:val('epi'),
+      periwound:val('peri'),
+      exudate:val('exudate')
+    },
+    burn:{
+      day_since_burn:val('burnDay'),
+      mechanism:val('burnMechanism'),
+      clinician_impression:val('burnClinician'),
+      color:val('burnColor'),
+      surface:val('burnSurface'),
+      blanching:val('burnBlanch'),
+      pain:val('burnPain'),
+      sensation:val('burnSensation'),
+      texture:val('burnTexture'),
+      tbsa_percent:(typeof currentTBSA!=='undefined'?currentTBSA:''),
+      partial_thickness_tbsa:val('tbsaPartial'),
+      full_thickness_tbsa:val('tbsaFull')
+    },
+    notes:{
+      clinical:val('notes'),
+      generated:val('generated')
+    }
+  };
+  return data;
+}
+function safeFilename(){
+  const mrn=val('mrn') || val('patientId') || 'patient';
+  const date=val('date2') || val('date1') || new Date().toISOString().slice(0,10);
+  return (`WoundMeasure_${mrn}_${date}`).replace(/[^\w\-]+/g,'_');
+}
+function rowsForReport(d){
+  return [
+    ['Patient ID',d.patient.patient_id],['Name',`${d.patient.first_name} ${d.patient.last_name}`.trim()],
+    ['MRN',d.patient.mrn],['Hospital',d.patient.hospital],['Admission date',d.patient.admission_date],
+    ['Wound location',d.wound.location],['Wound type',d.wound.type],['Procedure',d.wound.procedure],
+    ['Baseline date',d.baseline.date],['Baseline wound area (cm²)',d.baseline.wound_area_cm2],
+    ['Baseline granulation area (cm²)',d.baseline.granulation_area_cm2],['Baseline granulation (%)',d.baseline.granulation_percent],
+    ['Follow-up date',d.followup.date],['Follow-up wound area (cm²)',d.followup.wound_area_cm2],
+    ['Follow-up granulation area (cm²)',d.followup.granulation_area_cm2],['Follow-up granulation (%)',d.followup.granulation_percent],
+    ['Wound area reduction (%)',d.comparison.wound_area_reduction_percent],['Healing rate (cm²/week)',d.comparison.healing_rate_cm2_week],
+    ['Burn TBSA (%)',d.burn.tbsa_percent],['Partial-thickness TBSA (%)',d.burn.partial_thickness_tbsa],
+    ['Full-thickness TBSA (%)',d.burn.full_thickness_tbsa]
+  ];
+}
+function exportExcel(){
+  if(typeof XLSX==='undefined'){alert('Excel library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const summary=rowsForReport(d).map(r=>({Parameter:r[0],Value:r[1]}));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(summary),'Summary');
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet([{
+    patient_id:d.patient.patient_id, first_name:d.patient.first_name,last_name:d.patient.last_name,national_id:d.patient.national_id,
+    age:d.patient.age,sex:d.patient.sex,phone:d.patient.phone,mrn:d.patient.mrn,hospital:d.patient.hospital,admission_date:d.patient.admission_date,
+    wound_location:d.wound.location,wound_type:d.wound.type,procedure:d.wound.procedure,
+    baseline_date:d.baseline.date,baseline_area_cm2:d.baseline.wound_area_cm2,baseline_granulation_cm2:d.baseline.granulation_area_cm2,baseline_granulation_pct:d.baseline.granulation_percent,
+    followup_date:d.followup.date,followup_area_cm2:d.followup.wound_area_cm2,followup_granulation_cm2:d.followup.granulation_area_cm2,followup_granulation_pct:d.followup.granulation_percent,
+    wound_area_reduction_pct:d.comparison.wound_area_reduction_percent,healing_rate_cm2_week:d.comparison.healing_rate_cm2_week,
+    tbsa_pct:d.burn.tbsa_percent,partial_tbsa_pct:d.burn.partial_thickness_tbsa,full_tbsa_pct:d.burn.full_thickness_tbsa
+  }]),'Research Data');
+  XLSX.writeFile(wb,safeFilename()+'.xlsx');
+}
+function exportResearchExcel(){
+  if(typeof XLSX==='undefined'){alert('Excel library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(false);
+  const row={
+    research_patient_id:d.patient.patient_id,age:d.patient.age,sex:d.patient.sex,hospital:d.patient.hospital,admission_date:d.patient.admission_date,
+    wound_location:d.wound.location,wound_type:d.wound.type,procedure:d.wound.procedure,
+    baseline_date:d.baseline.date,baseline_area_cm2:d.baseline.wound_area_cm2,baseline_granulation_cm2:d.baseline.granulation_area_cm2,baseline_granulation_pct:d.baseline.granulation_percent,
+    followup_date:d.followup.date,followup_area_cm2:d.followup.wound_area_cm2,followup_granulation_cm2:d.followup.granulation_area_cm2,followup_granulation_pct:d.followup.granulation_percent,
+    wound_area_reduction_pct:d.comparison.wound_area_reduction_percent,healing_rate_cm2_week:d.comparison.healing_rate_cm2_week,
+    tbsa_pct:d.burn.tbsa_percent,partial_tbsa_pct:d.burn.partial_thickness_tbsa,full_tbsa_pct:d.burn.full_thickness_tbsa
+  };
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet([row]),'Anonymized Research');
+  XLSX.writeFile(wb,'Research_'+new Date().toISOString().slice(0,10)+'.xlsx');
+}
+async function exportPDF(){
+  if(!window.jspdf){alert('PDF library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const {jsPDF}=window.jspdf;
+  const pdf=new jsPDF({unit:'mm',format:'a4'});
+  let y=15;
+  pdf.setFontSize(16); pdf.text('WoundMeasure Clinical Report',14,y); y+=9;
+  pdf.setFontSize(9); pdf.text('Generated: '+new Date().toLocaleString(),14,y); y+=8;
+  pdf.setFontSize(10);
+  for(const [k,v] of rowsForReport(d)){
+    const line=`${k}: ${v===null||v===undefined||v===''?'—':v}`;
+    const lines=pdf.splitTextToSize(line,180);
+    if(y+lines.length*5>282){pdf.addPage();y=15;}
+    pdf.text(lines,14,y); y+=lines.length*5+1;
+  }
+  const notes=(d.notes.generated||d.notes.clinical||'').trim();
+  if(notes){
+    y+=4; if(y>250){pdf.addPage();y=15;}
+    pdf.setFontSize(12);pdf.text('Clinical note',14,y);y+=6;pdf.setFontSize(9);
+    const lines=pdf.splitTextToSize(notes,180);
+    for(const ln of lines){if(y>282){pdf.addPage();y=15;}pdf.text(ln,14,y);y+=4.5;}
+  }
+  // Add images when available
+  for(const item of [[1,'Baseline photograph'],[2,'Follow-up photograph']]){
+    const s=S[item[0]];
+    if(s && s.img && s.img.src && s.img.src.startsWith('data:image')){
+      pdf.addPage();pdf.setFontSize(12);pdf.text(item[1],14,15);
+      try{pdf.addImage(s.img.src,'JPEG',14,22,180,135,undefined,'FAST');}catch(e){}
+    }
+  }
+  pdf.save(safeFilename()+'.pdf');
+}
+async function exportWord(){
+  if(typeof docx==='undefined'){alert('Word library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const {Document,Packer,Paragraph,TextRun,Table,TableRow,TableCell,WidthType,HeadingLevel}=docx;
+  const tableRows=rowsForReport(d).map(([k,v])=>new TableRow({children:[
+    new TableCell({children:[new Paragraph({children:[new TextRun({text:String(k),bold:true})]})]}),
+    new TableCell({children:[new Paragraph(String(v===null||v===undefined||v===''?'—':v))]})
+  ]}));
+  const children=[
+    new Paragraph({text:'WoundMeasure Clinical Report',heading:HeadingLevel.TITLE}),
+    new Paragraph('Generated: '+new Date().toLocaleString()),
+    new Table({rows:tableRows,width:{size:100,type:WidthType.PERCENTAGE}}),
+    new Paragraph({text:'Clinical note',heading:HeadingLevel.HEADING_2}),
+    new Paragraph(d.notes.generated||d.notes.clinical||'—')
+  ];
+  const documentFile=new Document({sections:[{children}]});
+  const blob=await Packer.toBlob(documentFile);
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=safeFilename()+'.docx';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+function saveDriveSettings(){
+  localStorage.setItem('woundmeasure_drive_endpoint',val('driveEndpoint'));
+  localStorage.setItem('woundmeasure_drive_folder',val('driveFolder'));
+  const s=document.getElementById('driveStatus');s.className='successbox small';s.textContent='Drive settings saved on this device.';
+}
+function loadDriveSettings(){
+  const e=localStorage.getItem('woundmeasure_drive_endpoint');const f=localStorage.getItem('woundmeasure_drive_folder');
+  if(e&&document.getElementById('driveEndpoint'))document.getElementById('driveEndpoint').value=e;
+  if(f&&document.getElementById('driveFolder'))document.getElementById('driveFolder').value=f;
+}
+async function saveToGoogleDrive(){
+  const endpoint=val('driveEndpoint').trim();
+  const status=document.getElementById('driveStatus');
+  if(!endpoint){status.className='errorbox small';status.textContent='Enter your deployed Google Apps Script Web App URL first.';return;}
+  const payload=collectAppData(true);
+  payload.drive_root_folder=val('driveFolder')||'WoundMeasure';
+  // include current photos if they are browser data URLs
+  payload.images={};
+  if(S[1]&&S[1].img&&S[1].img.src&&S[1].img.src.startsWith('data:image'))payload.images.baseline=S[1].img.src;
+  if(S[2]&&S[2].img&&S[2].img.src&&S[2].img.src.startsWith('data:image'))payload.images.followup=S[2].img.src;
+  status.className='status small';status.textContent='Saving to Google Drive…';
+  try{
+    const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});
+    const txt=await res.text();
+    let result={};try{result=JSON.parse(txt);}catch(e){result={ok:res.ok,message:txt};}
+    if(!res.ok || result.ok===false)throw new Error(result.error||result.message||'Save failed');
+    status.className='successbox small';
+    status.innerHTML=`Saved to Google Drive.${result.folder_url?` <a href="${result.folder_url}" target="_blank">Open patient folder</a>`:''}`;
+  }catch(err){
+    status.className='errorbox small';
+    status.textContent='Google Drive save failed: '+err.message;
+  }
+}
+document.addEventListener('DOMContentLoaded',()=>{loadDriveSettings(); if(document.getElementById('tbsaRegions'))renderTBSA();});
+
+
+let previousPatientResults=[];
+
+function driveEndpoint(){
+  const el=document.getElementById('driveEndpoint');
+  return el ? el.value.trim() : '';
+}
+
+async function searchPreviousPatient(){
+  const endpoint=driveEndpoint();
+  const key=(document.getElementById('searchPatientKey').value||'').trim();
+  const status=document.getElementById('patientSearchStatus');
+  const box=document.getElementById('previousPatientBox');
+
+  if(!endpoint){
+    status.className='errorbox small';
+    status.textContent='Configure your Google Apps Script Web App URL in the Google Drive section first.';
+    return;
+  }
+  if(!key){
+    status.className='errorbox small';
+    status.textContent='Enter an MRN or Patient ID.';
+    return;
+  }
+
+  status.className='status small';
+  status.textContent='Searching Google Drive…';
+  box.style.display='none';
+
+  try{
+    const url=endpoint + (endpoint.includes('?')?'&':'?') +
+      'action=searchPatient&key=' + encodeURIComponent(key) +
+      '&root=' + encodeURIComponent(val('driveFolder')||'WoundMeasure');
+
+    const res=await fetch(url,{method:'GET'});
+    const txt=await res.text();
+    let data={};
+    try{data=JSON.parse(txt);}catch(e){throw new Error(txt||'Invalid server response');}
+    if(!res.ok || data.ok===false) throw new Error(data.error||'Search failed');
+    if(!data.found){
+      previousPatientResults=[];
+      status.className='status small';
+      status.textContent='No patient folder or assessment was found for this MRN/Patient ID.';
+      return;
+    }
+
+    previousPatientResults=data.assessments||[];
+    const p=data.patient||{};
+    document.getElementById('previousPatientTitle').textContent=
+      ((p.first_name||'')+' '+(p.last_name||'')).trim() || p.patient_id || p.mrn || key;
+    document.getElementById('previousPatientMeta').textContent=
+      `MRN: ${p.mrn||'—'} · Patient ID: ${p.patient_id||'—'} · Hospital: ${p.hospital||'—'} · Assessments: ${previousPatientResults.length}`;
+
+    const body=document.getElementById('previousVisitsBody');
+    body.innerHTML='';
+    previousPatientResults.forEach((a,i)=>{
+      const tr=document.createElement('tr');
+      const gran=(a.followup && a.followup.granulation_percent!=='' && a.followup.granulation_percent!=null)
+        ? Number(a.followup.granulation_percent).toFixed(1)+'%' : '—';
+      const area=(a.followup && a.followup.wound_area_cm2!=='' && a.followup.wound_area_cm2!=null)
+        ? Number(a.followup.wound_area_cm2).toFixed(2)+' cm²'
+        : (a.baseline && a.baseline.wound_area_cm2!=='' && a.baseline.wound_area_cm2!=null)
+          ? Number(a.baseline.wound_area_cm2).toFixed(2)+' cm²' : '—';
+      const tbsa=(a.burn && a.burn.tbsa_percent!=='' && a.burn.tbsa_percent!=null)
+        ? Number(a.burn.tbsa_percent).toFixed(1)+'%' : '—';
+      const date=(a.followup&&a.followup.date)||(a.baseline&&a.baseline.date)||a.exported_at||'—';
+      const wound=(a.wound&&a.wound.location)||'—';
+
+      tr.innerHTML=`
+        <td>${escapeHtml(String(date))}</td>
+        <td>${escapeHtml(String(wound))}</td>
+        <td>${escapeHtml(String(area))}</td>
+        <td>${escapeHtml(String(gran))}</td>
+        <td>${escapeHtml(String(tbsa))}</td>
+        <td>
+          <button class="secondary" onclick="openPreviousAssessment(${i})">Open</button>
+          ${a.latest_photo_url ? `<button class="ghost" onclick="loadPreviousPhotoAsGhost(${i})">Ghost</button>` : ''}
+        </td>`;
+      body.appendChild(tr);
+    });
+
+    status.className='successbox small';
+    status.textContent='Patient found. Select a previous assessment.';
+    box.style.display='block';
+  }catch(err){
+    status.className='errorbox small';
+    status.textContent='Search failed: '+err.message;
+  }
+}
+
+function escapeHtml(s){
+  return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+}
+
+function setField(id,value){
+  const el=document.getElementById(id);
+  if(el && value!==undefined && value!==null) el.value=value;
+}
+
+function openPreviousAssessment(i){
+  const d=previousPatientResults[i];
+  if(!d)return;
+  const p=d.patient||{}, w=d.wound||{}, b=d.burn||{}, t=d.tissue||{}, n=d.notes||{};
+
+  setField('patientId',p.patient_id||'');
+  setField('firstName',p.first_name||'');
+  setField('lastName',p.last_name||'');
+  setField('nationalId',p.national_id||'');
+  setField('patientAge',p.age||'');
+  setField('patientSex',p.sex||'');
+  setField('admissionDate',p.admission_date||'');
+  setField('phone',p.phone||'');
+  setField('mrn',p.mrn||'');
+  setField('hospital',p.hospital||'');
+
+  setField('location',w.location||'');
+  setField('woundType',w.type||'');
+  setField('procedure',w.procedure||'');
+
+  setField('date1',(d.followup&&d.followup.date)||(d.baseline&&d.baseline.date)||'');
+  setField('gran',t.granulation_percent||'');
+  setField('slough',t.slough_percent||'');
+  setField('necrosis',t.necrosis_percent||'');
+  setField('epi',t.epithelialization_percent||'');
+  setField('peri',t.periwound||'');
+  setField('exudate',t.exudate||'');
+  setField('notes',n.clinical||'');
+  setField('generated',n.generated||'');
+
+  setField('burnDay',b.day_since_burn||'');
+  setField('burnMechanism',b.mechanism||'');
+  setField('burnClinician',b.clinician_impression||'');
+  setField('burnColor',b.color||'');
+  setField('burnSurface',b.surface||'');
+  setField('burnBlanch',b.blanching||'');
+  setField('burnPain',b.pain||'');
+  setField('burnSensation',b.sensation||'');
+  setField('burnTexture',b.texture||'');
+
+  // Restore numeric previous visit values for comparison.
+  const srcVisit=(d.followup && d.followup.wound_area_cm2!=='' && d.followup.wound_area_cm2!=null) ? d.followup : d.baseline;
+  if(typeof S!=='undefined' && S[1]){
+    S[1].area=srcVisit && srcVisit.wound_area_cm2!=='' ? Number(srcVisit.wound_area_cm2) : null;
+    S[1].granArea=srcVisit && srcVisit.granulation_area_cm2!=='' ? Number(srcVisit.granulation_area_cm2) : null;
+    S[1].granPct=srcVisit && srcVisit.granulation_percent!=='' ? Number(srcVisit.granulation_percent) : null;
+    const area1=document.getElementById('area1');
+    if(area1)area1.textContent=S[1].area!=null?S[1].area.toFixed(2)+' cm²':'—';
+    const ga1=document.getElementById('granArea1');
+    if(ga1)ga1.textContent=S[1].granArea!=null?S[1].granArea.toFixed(2)+' cm²':'—';
+    const gp1=document.getElementById('granPct1');
+    if(gp1)gp1.textContent=S[1].granPct!=null?S[1].granPct.toFixed(1)+'%':'—';
+  }
+
+  if(typeof compare==='function') compare();
+
+  document.getElementById('patientSearchStatus').className='successbox small';
+  document.getElementById('patientSearchStatus').textContent='Previous assessment loaded into the form. You can now take the new follow-up photograph.';
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+async function loadPreviousPhotoAsGhost(i){
+  const d=previousPatientResults[i];
+  if(!d || !d.latest_photo_url){
+    alert('No previous photograph is available for this assessment.');
+    return;
+  }
+  try{
+    const res=await fetch(d.latest_photo_url);
+    if(!res.ok)throw new Error('Photo download failed');
+    const payload=await res.json();
+    if(!payload.ok || !payload.data_url)throw new Error(payload.error||'No image returned');
+    const dataUrl=payload.data_url;
+    {
+      const ghost=document.getElementById('ghostImage');
+      if(ghost)ghost.src=dataUrl;
+
+      const img=new Image();
+      img.onload=()=>{
+        if(typeof S!=='undefined' && S[1]){
+          S[1].img=img;
+          if(typeof redraw==='function') redraw(1);
+        }
+      };
+      img.src=dataUrl;
+
+      document.getElementById('patientSearchStatus').className='successbox small';
+      document.getElementById('patientSearchStatus').textContent='Previous photograph loaded as Ghost Overlay. Open the camera and align the current wound.';
+    }
+  }catch(err){
+    document.getElementById('patientSearchStatus').className='errorbox small';
+    document.getElementById('patientSearchStatus').textContent='Could not load previous photograph: '+err.message;
+  }
+}
+
+function clearPatientSearch(){
+  previousPatientResults=[];
+  document.getElementById('searchPatientKey').value='';
+  document.getElementById('patientSearchStatus').className='status small';
+  document.getElementById('patientSearchStatus').textContent='Enter MRN or Patient ID.';
+  document.getElementById('previousPatientBox').style.display='none';
+  document.getElementById('previousVisitsBody').innerHTML='';
+}
+
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('./service-worker.js').catch(()=>{}));
+}
+
+const WM_DB='WoundMeasureOfflineDB', WM_STORE='records';
+
+function openWMDB(){
+  return new Promise((resolve,reject)=>{
+    const req=indexedDB.open(WM_DB,1);
+    req.onupgradeneeded=()=>{
+      const db=req.result;
+      if(!db.objectStoreNames.contains(WM_STORE)){
+        const s=db.createObjectStore(WM_STORE,{keyPath:'id'});
+        s.createIndex('synced','synced',{unique:false});
+        s.createIndex('saved_at','saved_at',{unique:false});
+      }
+    };
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function dbPut(record){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readwrite');
+    tx.objectStore(WM_STORE).put(record);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+async function dbAll(){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readonly');
+    const req=tx.objectStore(WM_STORE).getAll();
+    req.onsuccess=()=>resolve(req.result||[]);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function dbDelete(id){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readwrite');
+    tx.objectStore(WM_STORE).delete(id);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+function offlineCollectData(){
+  if(typeof collectAppData==='function'){
+    const d=collectAppData(true);
+    d.images=d.images||{};
+    try{
+      if(S[1]&&S[1].img&&S[1].img.src&&S[1].img.src.startsWith('data:image'))d.images.baseline=S[1].img.src;
+      if(S[2]&&S[2].img&&S[2].img.src&&S[2].img.src.startsWith('data:image'))d.images.followup=S[2].img.src;
+    }catch(e){}
+    return d;
+  }
+  return {saved_at:new Date().toISOString()};
+}
+async function saveOfflineRecord(){
+  const s=document.getElementById('offlineStatus');
+  try{
+    const id='WM-'+Date.now();
+    await dbPut({id,saved_at:new Date().toISOString(),synced:false,data:offlineCollectData()});
+    s.textContent='Saved on this device for offline use.';
+    s.className='successbox small';
+    showOfflineRecords();
+  }catch(e){
+    s.textContent='Offline save failed: '+e.message;
+    s.className='errorbox small';
+  }
+}
+async function showOfflineRecords(){
+  const list=document.getElementById('offlineList');
+  const rows=(await dbAll()).sort((a,b)=>String(b.saved_at).localeCompare(String(a.saved_at)));
+  if(!rows.length){list.innerHTML='<div class="small">No offline records stored.</div>';return;}
+  list.innerHTML=rows.map(r=>{
+    const p=(r.data&&r.data.patient)||{};
+    const name=((p.first_name||'')+' '+(p.last_name||'')).trim()||p.patient_id||p.mrn||'Unnamed';
+    return `<div class="kpi" style="margin-bottom:8px"><b>${name}</b><br><span class="small">${new Date(r.saved_at).toLocaleString()} · ${r.synced?'Synced':'Pending sync'}</span><div class="toolbar"><button class="secondary" onclick="deleteOfflineRecord('${r.id}')">Delete</button></div></div>`;
+  }).join('');
+}
+async function deleteOfflineRecord(id){await dbDelete(id);showOfflineRecords();}
+async function syncOfflineRecords(){
+  const s=document.getElementById('offlineStatus');
+  if(!navigator.onLine){s.textContent='No internet connection. Records stay on this device.';s.className='errorbox small';return;}
+  const endpoint=(document.getElementById('driveEndpoint')||{}).value||'';
+  if(!endpoint.trim()){s.textContent='Enter your Google Apps Script URL first.';s.className='errorbox small';return;}
+  const rows=await dbAll(); let ok=0,fail=0;
+  for(const r of rows.filter(x=>!x.synced)){
+    try{
+      r.data.drive_root_folder=((document.getElementById('driveFolder')||{}).value)||'WoundMeasure';
+      const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(r.data)});
+      const t=await res.text(); let j={}; try{j=JSON.parse(t)}catch(e){}
+      if(!res.ok||j.ok===false)throw new Error(j.error||'Sync failed');
+      r.synced=true;r.synced_at=new Date().toISOString();await dbPut(r);ok++;
+    }catch(e){fail++;}
+  }
+  s.textContent=`Sync complete: ${ok} synced, ${fail} failed.`;
+  s.className=fail?'errorbox small':'successbox small';
+  showOfflineRecords();
+}
+window.addEventListener('online',()=>{const s=document.getElementById('offlineStatus');if(s){s.textContent='Internet restored. You can sync pending records.';s.className='successbox small';}});
+window.addEventListener('offline',()=>{const s=document.getElementById('offlineStatus');if(s){s.textContent='Offline mode active.';s.className='status small';}});
+
+</script>
+
+
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#173b73">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="WoundMeasure">
+<link rel="apple-touch-icon" href="./icon-192.png">
+</head>
+<body>
+<header>
+  <h1>WoundMeasure AI</h1>
+  <p>Serial wound measurement & photo comparison — prototype MVP</p>
+</header>
+
+<main class="grid">
+  <section class="card span12">
+    <h2>1. Patient Registration & OCR Intake</h2>
+    <p class="small">Take a photo of the admission sheet, patient label, hospital card or printed record. OCR extracts Persian/English text and attempts to populate the patient fields. Always verify extracted identifiers against the original document.</p>
+    <div class="patient-grid">
+      <div><label>First name / نام</label><input id="firstName" placeholder="First name"></div>
+      <div><label>Last name / نام خانوادگی</label><input id="lastName" placeholder="Last name"></div>
+      <div><label>Patient ID</label><input id="patientId" placeholder="Internal ID, e.g. P001"></div>
+      <div><label>National ID / کد ملی</label><input id="nationalId" inputmode="numeric" placeholder="Optional"></div>
+      <div><label>Age / سن</label><input id="patientAge" type="number" min="0" max="120"></div>
+      <div><label>Sex / جنس</label><select id="patientSex"><option value="">Not specified</option><option>Male</option><option>Female</option><option>Other / not recorded</option></select></div>
+      <div><label>Admission date / تاریخ بستری</label><input id="admissionDate" placeholder="YYYY-MM-DD or local date"></div>
+      <div><label>Phone / شماره تماس</label><input id="phone" inputmode="tel" placeholder="Phone number"></div>
+      <div><label>Medical record no. / شماره پرونده</label><input id="mrn" placeholder="MRN / پرونده"></div>
+      <div><label>Hospital / نام بیمارستان</label><input id="hospital" placeholder="Hospital name"></div>
+      <div><label>Wound location</label><input id="location" placeholder="e.g., Right medial ankle"></div>
+      <div><label>Wound type</label><select id="woundType"><option>Postoperative wound</option><option>Skin graft</option><option>Donor site</option><option>Pressure injury</option><option>Diabetic foot</option><option>Burn</option><option>Traumatic wound</option><option>Flap</option><option>Other</option></select></div>
+      <div><label>Procedure / context</label><input id="procedure" placeholder="e.g., STSG, debridement"></div>
+    </div>
+    <h3>Scan patient document</h3>
+    <div class="ocr-wrap">
+      <div>
+        <label>Take photo / choose image</label><input id="patientDoc" type="file" accept="image/*" capture="environment">
+        <img id="ocrPreview" class="ocr-preview" alt="Document preview">
+        <div class="toolbar"><button onclick="runOCR()">Run OCR</button><button class="ghost" onclick="parseOCR()">Fill fields from OCR</button><button class="secondary" onclick="clearPatientOCR()">Clear scan</button></div>
+        <div id="ocrStatus" class="ocr-status small">No document scanned.</div>
+      </div>
+      <div><label>Extracted OCR text</label><textarea id="ocrText" placeholder="Recognized Persian / English text appears here. You can edit it before filling the fields."></textarea><p class="small">OCR may misread Persian names, handwritten text, glare or low-quality hospital labels. Verify all fields manually.</p></div>
+    </div>
+    <div class="note">Patient identifiers are sensitive health information. This prototype keeps data in the current browser session and does not provide secure cloud storage. A production version needs encryption, login/access control, audit logs and an appropriate privacy policy.</div>
+  </section>
+
+  <section class="card span6">
+    <h2>2. Baseline photo</h2>
+    <div class="row">
+      <div><label>Date</label><input type="date" id="date1"></div>
+      <div><label>Calibration: cm per drawn line</label><input id="cal1" type="number" min="0.1" step="0.1" value="2"></div>
+    </div>
+    <label>Upload photo</label>
+    <input type="file" id="file1" accept="image/*">
+    <div class="photo-wrap" style="margin-top:10px"><canvas id="c1" width="800" height="600"></canvas></div>
+    <div class="toolbar">
+      <button class="secondary" onclick="mode(1,'cal')">Draw calibration line</button>
+      <button class="ghost" onclick="mode(1,'wound')">Trace wound</button>
+      <button class="ghost" onclick="mode(1,'gran')">Trace granulation</button>
+      <button class="secondary" onclick="undo(1)">Undo</button>
+      <button class="secondary" onclick="clearDraw(1)">Clear</button>
+    </div>
+    <div class="small">First draw a line over a known ruler segment, then trace around the wound margin and close the contour.</div>
+    <div class="metric-grid"><div class="kpi"><span>Wound area</span><div class="v" id="area1">—</div></div><div class="kpi"><span>Granulation area</span><div class="v" id="granArea1">—</div></div><div class="kpi"><span>Granulation %</span><div class="v" id="granPct1">—</div></div><div class="kpi"><span>Calibration</span><div class="v" id="calStatus1" style="font-size:16px">—</div></div></div>
+  </section>
+
+  <section class="card span12">
+    <h2>3. Re-photo Alignment Camera</h2>
+    <p class="small">For a previously photographed wound, open the live camera and overlay the baseline image as a semi-transparent ghost. Match position, distance and angle, then capture the follow-up.</p>
+    <div class="grid"><div class="span6"><div class="camera-box"><video id="liveVideo" autoplay playsinline muted></video><img id="ghostImage" alt=""><div class="guide"></div></div></div><div class="span6"><label>Ghost image opacity</label><div class="range-row"><input id="ghostOpacity" type="range" min="0" max="0.9" step="0.05" value="0.35"><span id="ghostOpacityText">35%</span></div><label>Camera</label><select id="cameraFacing"><option value="environment">Rear camera</option><option value="user">Front camera</option></select><div class="toolbar"><button onclick="startCamera()">Open camera</button><button class="ghost" onclick="useBaselineAsGhost()">Use baseline as ghost</button><button class="secondary" onclick="captureFollowup()">Capture as follow-up</button><button class="secondary" onclick="stopCamera()">Stop camera</button></div><div class="note">Match anatomical landmarks, wound orientation, camera distance and angle. Keep the calibration marker in the same plane as the wound.</div></div></div>
+  </section>
+
+  <section class="card span6">
+    <h2>4. Follow-up photo</h2>
+    <div class="row">
+      <div><label>Date</label><input type="date" id="date2"></div>
+      <div><label>Calibration: cm per drawn line</label><input id="cal2" type="number" min="0.1" step="0.1" value="2"></div>
+    </div>
+    <label>Upload photo</label>
+    <input type="file" id="file2" accept="image/*">
+    <div class="photo-wrap" style="margin-top:10px"><canvas id="c2" width="800" height="600"></canvas></div>
+    <div class="toolbar">
+      <button class="secondary" onclick="mode(2,'cal')">Draw calibration line</button>
+      <button class="ghost" onclick="mode(2,'wound')">Trace wound</button>
+      <button class="ghost" onclick="mode(2,'gran')">Trace granulation</button>
+      <button class="secondary" onclick="undo(2)">Undo</button>
+      <button class="secondary" onclick="clearDraw(2)">Clear</button>
+    </div>
+    <div class="small">Use the same acquisition method and keep the reference marker in the same plane as the wound.</div>
+    <div class="metric-grid"><div class="kpi"><span>Wound area</span><div class="v" id="area2">—</div></div><div class="kpi"><span>Granulation area</span><div class="v" id="granArea2">—</div></div><div class="kpi"><span>Granulation %</span><div class="v" id="granPct2">—</div></div><div class="kpi"><span>Calibration</span><div class="v" id="calStatus2" style="font-size:16px">—</div></div></div>
+  </section>
+
+  <section class="card span12">
+    <h2>5. Serial comparison</h2>
+    <div class="grid"><div class="kpi span4"><span>Wound area change</span><div class="v" id="delta">—</div></div><div class="kpi span4"><span>Wound area reduction</span><div class="v" id="par">—</div></div><div class="kpi span4"><span>Healing rate</span><div class="v" id="rate">—</div></div><div class="kpi span4"><span>Granulation area change</span><div class="v" id="granDelta">—</div></div><div class="kpi span4"><span>Granulation % change</span><div class="v" id="granPctDelta">—</div></div><div class="kpi span4"><span>Current granulation</span><div class="v" id="currentGranPct">—</div></div></div><div style="overflow:auto;margin-top:12px"><table><thead><tr><th>Metric</th><th>Baseline</th><th>Follow-up</th><th>Change</th></tr></thead><tbody><tr><td>Wound area</td><td id="tblW1">—</td><td id="tblW2">—</td><td id="tblWChange">—</td></tr><tr><td>Granulation area</td><td id="tblG1">—</td><td id="tblG2">—</td><td id="tblGChange">—</td></tr><tr><td>Granulation proportion</td><td id="tblGP1">—</td><td id="tblGP2">—</td><td id="tblGPChange">—</td></tr></tbody></table></div>
+    <div style="margin-top:14px"><canvas id="chart" width="900" height="240"></canvas></div>
+    <div id="summary" class="note" style="margin-top:12px">Add and trace two calibrated photographs to calculate change.</div>
+  </section>
+
+  <section class="card span12">
+    <h2>6. Clinical assessment</h2>
+    <div class="grid">
+      <div class="span4"><label>Granulation %</label><input id="gran" type="number" min="0" max="100"></div>
+      <div class="span4"><label>Slough / fibrin %</label><input id="slough" type="number" min="0" max="100"></div>
+      <div class="span4"><label>Necrosis / eschar %</label><input id="necrosis" type="number" min="0" max="100"></div>
+      <div class="span4"><label>Epithelialization %</label><input id="epi" type="number" min="0" max="100"></div>
+      <div class="span4"><label>Periwound</label>
+        <select id="peri"><option>Normal</option><option>Erythema</option><option>Maceration</option><option>Edema</option><option>Discoloration</option><option>Other</option></select>
+      </div>
+      <div class="span4"><label>Exudate</label>
+        <select id="exudate"><option>None</option><option>Low</option><option>Moderate</option><option>Heavy</option></select>
+      </div>
+    </div>
+    <label>Clinical notes</label><textarea id="notes" placeholder="Optional examination findings, treatment, dressing, etc."></textarea>
+    <div class="toolbar">
+      <button onclick="generateNote()">Generate clinical note</button>
+      <button class="secondary" onclick="window.print()">Print / Save PDF</button>
+    </div>
+    <textarea id="generated" style="min-height:150px" placeholder="Generated note will appear here."></textarea>
+  </section>
+
+
+  <section class="card span12">
+    <h2>7. Burn Depth Assistant</h2>
+    <p class="small">
+      Clinician-supervised burn-depth support using colour, pain, blanching, blisters/surface,
+      sensation, and serial evolution. Burns are often mixed-depth and may evolve during the first days.
+    </p>
+
+    <div class="grid">
+      <div class="span4">
+        <label>Day since burn</label>
+        <input id="burnDay" type="number" min="0" step="1" placeholder="e.g., 3">
+      </div>
+      <div class="span4">
+        <label>Mechanism</label>
+        <select id="burnMechanism">
+          <option value="unknown">Not specified</option>
+          <option>Flame</option><option>Scald</option><option>Contact</option>
+          <option>Chemical</option><option>Electrical</option><option>Friction</option><option>Other</option>
+        </select>
+      </div>
+      <div class="span4">
+        <label>Clinical impression before assistant</label>
+        <select id="burnClinician">
+          <option value="unknown">No prior impression</option>
+          <option value="superficial">Superficial / 1st degree</option>
+          <option value="sp">Superficial partial-thickness</option>
+          <option value="mid">Mid-dermal partial-thickness</option>
+          <option value="deep">Deep partial-thickness</option>
+          <option value="full">Full-thickness / 3rd degree</option>
+          <option value="mixed">Mixed depth</option>
+        </select>
+      </div>
+
+      <div class="span4">
+        <label>Colour / appearance</label>
+        <select id="burnColor">
+          <option value="unknown">Not assessed</option>
+          <option value="red">Uniform red / erythematous</option>
+          <option value="pinkred">Pink / bright red</option>
+          <option value="mottled">Mottled pink / red-white</option>
+          <option value="white">Pale / white / waxy</option>
+          <option value="brownblack">Brown / black / charred</option>
+        </select>
+      </div>
+
+      <div class="span4">
+        <label>Blisters / surface</label>
+        <select id="burnSurface">
+          <option value="unknown">Not assessed</option>
+          <option value="noblister">No blister, intact erythematous skin</option>
+          <option value="blistermoist">Blistered / moist / weeping</option>
+          <option value="mottledmoist">Patchy / mottled, partly moist</option>
+          <option value="dry">Dry / pale</option>
+          <option value="leathery">Dry / leathery eschar</option>
+        </select>
+      </div>
+
+      <div class="span4">
+        <label>Blanching</label>
+        <select id="burnBlanch">
+          <option value="unknown">Not assessed</option>
+          <option value="brisk">Brisk blanching</option>
+          <option value="sluggish">Sluggish / delayed blanching</option>
+          <option value="minimal">Minimal blanching</option>
+          <option value="none">No blanching</option>
+        </select>
+      </div>
+
+      <div class="span4">
+        <label>Pain</label>
+        <select id="burnPain">
+          <option value="unknown">Not assessed</option>
+          <option value="painful">Painful</option>
+          <option value="verypainful">Very painful / hypersensitive</option>
+          <option value="reduced">Reduced pain</option>
+          <option value="minimal">Minimal / no pain</option>
+        </select>
+      </div>
+
+      <div class="span4">
+        <label>Sensation</label>
+        <select id="burnSensation">
+          <option value="unknown">Not assessed</option>
+          <option value="normal">Normal sensation</option>
+          <option value="hyper">Hypersensitive</option>
+          <option value="reduced">Reduced sensation</option>
+          <option value="absent">Absent / insensate</option>
+        </select>
+      </div>
+
+      <div class="span4">
+        <label>Texture</label>
+        <select id="burnTexture">
+          <option value="unknown">Not assessed</option>
+          <option value="soft">Soft / pliable</option>
+          <option value="firm">Firm / dry</option>
+          <option value="leathery">Firm / leathery</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <button onclick="assessBurnDepthV3()">Assess burn depth</button>
+      <button class="secondary" onclick="resetBurnDepthV3()">Reset</button>
+    </div>
+
+    <div id="burnResult" class="kpi">
+      <span>Burn depth result</span>
+      <div class="v">—</div>
+      <div class="small" style="margin-top:6px">Enter the clinical features above.</div>
+    </div>
+
+    <h3>Mixed-depth composition</h3>
+    <p class="small">Optional clinician-estimated regional composition. Enter percentages if the burn contains more than one depth. The app checks that the total is 100%.</p>
+    <div class="grid">
+      <div class="span4"><label>Superficial %</label><input id="mixSup" type="number" min="0" max="100" value="0"></div>
+      <div class="span4"><label>Superficial partial %</label><input id="mixSP" type="number" min="0" max="100" value="0"></div>
+      <div class="span4"><label>Mid-dermal partial %</label><input id="mixMid" type="number" min="0" max="100" value="0"></div>
+      <div class="span4"><label>Deep partial %</label><input id="mixDeep" type="number" min="0" max="100" value="0"></div>
+      <div class="span4"><label>Full-thickness %</label><input id="mixFull" type="number" min="0" max="100" value="0"></div>
+      <div class="span4"><label>Indeterminate %</label><input id="mixInd" type="number" min="0" max="100" value="0"></div>
+    </div>
+    <div class="toolbar"><button class="ghost" onclick="updateMixedDepth()">Update mixed-depth summary</button></div>
+    <div id="mixedSummary" class="small">No mixed-depth percentages entered.</div>
+    <div id="mixBar" style="display:flex;height:24px;border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-top:8px;background:#f8fafc"></div>
+
+    <h3>Serial depth progression</h3>
+    <div class="grid">
+      <div class="span4">
+        <label>Previous assessment day</label>
+        <input id="prevBurnDay" type="number" min="0" step="1" placeholder="e.g., 1">
+      </div>
+      <div class="span4">
+        <label>Previous predominant depth</label>
+        <select id="prevBurnDepth">
+          <option value="unknown">Not available</option>
+          <option value="superficial">Superficial</option>
+          <option value="sp">Superficial partial</option>
+          <option value="mid">Mid-dermal partial</option>
+          <option value="deep">Deep partial</option>
+          <option value="full">Full thickness</option>
+          <option value="mixed">Mixed / indeterminate</option>
+        </select>
+      </div>
+      <div class="span4">
+        <label>Previous deep-partial + full-thickness area %</label>
+        <input id="prevDeepPct" type="number" min="0" max="100" placeholder="optional">
+      </div>
+    </div>
+    <div id="progressionResult" class="small" style="margin-top:8px"></div>
+
+    <div class="note" style="margin-top:12px">
+      Important: clinical burn-depth assessment is imperfect, and burns can deepen during the first several days.
+      A single RGB photograph cannot establish dermal viability. Use direct examination and repeat assessment;
+      consider perfusion-based assessment when depth is clinically uncertain.
+    </div>
+  </section>
+
+  <section class="card span12">
+    <h2>8. Burn TBSA Calculator</h2>
+    <p class="small">
+      Select involved regions to calculate an adult Rule-of-Nines estimate. For children, the app provides an approximate mode;
+      an age-adjusted Lund–Browder chart remains preferred for clinical precision. Include partial- and full-thickness burns, not simple erythema.
+    </p>
+    <div class="row">
+      <div><label>Patient group</label>
+        <select id="tbsaAge" onchange="renderTBSA()">
+          <option value="adult">Adult — Rule of Nines</option>
+          <option value="child">Infant / young child — approximate</option>
+        </select>
+      </div>
+      <div><label>Additional palm/scattered estimate (%)</label><input id="tbsaPalm" type="number" min="0" max="20" step="0.5" value="0" oninput="calcTBSA()"></div>
+    </div>
+    <div id="tbsaRegions" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:10px"></div>
+    <div class="grid" style="margin-top:12px">
+      <div class="kpi span4"><span>Total burned TBSA</span><div class="v" id="tbsaTotal">0%</div></div>
+      <div class="kpi span4"><span>Partial-thickness TBSA</span><div class="v" id="tbsaPartialOut">—</div></div>
+      <div class="kpi span4"><span>Full-thickness TBSA</span><div class="v" id="tbsaFullOut">—</div></div>
+    </div>
+    <div class="row">
+      <div><label>Partial-thickness component (%)</label><input id="tbsaPartial" type="number" min="0" max="100" step="0.5" value="0" oninput="depthTBSA()"></div>
+      <div><label>Full-thickness component (%)</label><input id="tbsaFull" type="number" min="0" max="100" step="0.5" value="0" oninput="depthTBSA()"></div>
+    </div>
+    <div id="tbsaBreakdown" class="small" style="margin-top:8px">No regions selected.</div>
+    <div class="toolbar"><button class="secondary" onclick="resetTBSA()">Reset TBSA</button></div>
+  </section>
+
+
+  <section class="card span12">
+    <h2>9. Export & Google Drive Backup</h2>
+    <p class="small">
+      Export the current patient/wound assessment locally, or save a structured copy to your Google Drive through your own Google Apps Script endpoint.
+    </p>
+
+    <div class="export-grid">
+      <button class="export-btn" onclick="exportPDF()">Export PDF</button>
+      <button class="export-btn" onclick="exportWord()">Export Word (.docx)</button>
+      <button class="export-btn" onclick="exportExcel()">Export Excel (.xlsx)</button>
+      <button class="export-btn ghost" onclick="exportResearchExcel()">Research Excel — anonymized</button>
+    </div>
+
+    <h3>Google Drive</h3>
+    <div class="drive-settings">
+      <div>
+        <label>Google Apps Script Web App URL</label>
+        <input id="driveEndpoint" placeholder="https://script.google.com/macros/s/.../exec">
+      </div>
+      <div>
+        <label>Drive root folder name</label>
+        <input id="driveFolder" value="WoundMeasure">
+      </div>
+    </div>
+    <div class="toolbar">
+      <button onclick="saveToGoogleDrive()">Save to Google Drive</button>
+      <button class="secondary" onclick="saveDriveSettings()">Remember endpoint on this device</button>
+    </div>
+    <div id="driveStatus" class="status small">
+      Configure the Apps Script endpoint first. The included <b>google_apps_script.gs</b> file is ready to deploy.
+    </div>
+
+    <h3>What is exported?</h3>
+    <div class="small">
+      Patient identifiers, hospital/MRN/admission data, wound location/type/procedure, baseline and follow-up dates,
+      wound area, granulation area and percentage, wound-area reduction, healing rate, burn-depth fields, TBSA values,
+      clinical notes and generated note. The anonymized research export excludes name, phone, national ID and MRN.
+    </div>
+  </section>
+
+  
+  <section class="card span12">
+    <h2>Offline Storage & Sync</h2>
+    <p class="small">Save the current assessment on this device when internet is unavailable. Later, reconnect and sync it to Google Drive.</p>
+    <div class="toolbar">
+      <button onclick="saveOfflineRecord()">Save Offline</button>
+      <button onclick="showOfflineRecords()" class="secondary">View Offline Records</button>
+      <button onclick="syncOfflineRecords()" class="secondary">Sync Pending to Google Drive</button>
+    </div>
+    <div id="offlineStatus" class="status small">No offline action yet.</div>
+    <div id="offlineList" style="margin-top:10px"></div>
+  </section>
+
+<section class="card span12">
+    <h2>Safety & intended use</h2>
+    <p class="small">Prototype for clinician-supervised documentation and measurement. The burn-depth assistant is a heuristic decision-support feature based on standard clinical burn characteristics (colour, pain, blanching, blisters/surface and sensation) and is not a validated diagnostic classifier. It does not diagnose infection, ischemia, flap compromise, malignancy, burn depth, or other conditions. Measurements depend on accurate calibration, wound-border tracing, camera angle, and image quality. Clinical decisions require direct examination and appropriate investigations.</p>
+  </section>
+</main>
+<div class="footer">WoundMeasure AI MVP — local browser prototype</div>
+
+<script>
+const S={1:{img:null,mode:'cal',calPts:[],poly:[],gran:[]},2:{img:null,mode:'cal',calPts:[],poly:[],gran:[]}};
+function mode(n,m){S[n].mode=m;}
+function canvas(n){return document.getElementById('c'+n);}
+function loadFile(n,file){
+  if(!file)return;
+  const img=new Image(); img.onload=()=>{S[n].img=img; S[n].calPts=[]; S[n].poly=[]; S[n].gran=[]; redraw(n); calc(n)};
+  img.src=URL.createObjectURL(file);
+}
+document.getElementById('file1').onchange=e=>loadFile(1,e.target.files[0]);
+document.getElementById('file2').onchange=e=>loadFile(2,e.target.files[0]);
+
+function ptFromEvent(c,e){
+  const r=c.getBoundingClientRect();
+  const x=((e.touches?e.touches[0].clientX:e.clientX)-r.left)*c.width/r.width;
+  const y=((e.touches?e.touches[0].clientY:e.clientY)-r.top)*c.height/r.height;
+  return {x,y};
+}
+function setup(n){
+  const c=canvas(n);
+  const handler=e=>{
+    e.preventDefault();
+    const p=ptFromEvent(c,e);
+    if(S[n].mode==='cal'){
+      if(S[n].calPts.length>=2) S[n].calPts=[];
+      S[n].calPts.push(p);
+    } else if(S[n].mode==='wound'){
+      S[n].poly.push(p);
+    } else if(S[n].mode==='gran'){
+      S[n].gran.push(p);
+    }
+    redraw(n); calc(n);
+  };
+  c.addEventListener('click',handler);
+}
+setup(1); setup(2);
+
+function redraw(n){
+  const c=canvas(n), ctx=c.getContext('2d');
+  ctx.clearRect(0,0,c.width,c.height);
+  if(S[n].img){
+    const img=S[n].img, scale=Math.min(c.width/img.width,c.height/img.height);
+    const w=img.width*scale,h=img.height*scale,x=(c.width-w)/2,y=(c.height-h)/2;
+    ctx.drawImage(img,x,y,w,h);
+  }else{
+    ctx.fillStyle='#eef2f6';ctx.fillRect(0,0,c.width,c.height);
+    ctx.fillStyle='#667085';ctx.font='28px sans-serif';ctx.textAlign='center';
+    ctx.fillText('Upload wound photo',c.width/2,c.height/2);
+  }
+  const cp=S[n].calPts;
+  if(cp.length){
+    ctx.strokeStyle='#2563eb';ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(cp[0].x,cp[0].y);
+    if(cp[1])ctx.lineTo(cp[1].x,cp[1].y);ctx.stroke();
+  }
+  const p=S[n].poly;
+  if(p.length){
+    ctx.strokeStyle='#16a34a';ctx.fillStyle='rgba(22,163,74,.18)';ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(p[0].x,p[0].y);
+    p.slice(1).forEach(q=>ctx.lineTo(q.x,q.y));
+    if(p.length>=3){ctx.closePath();ctx.fill();}
+    ctx.stroke();
+    p.forEach(q=>{ctx.beginPath();ctx.arc(q.x,q.y,4,0,Math.PI*2);ctx.fillStyle='#166534';ctx.fill();});
+  }
+  const g=S[n].gran;
+  if(g.length){ctx.strokeStyle='#f59e0b';ctx.fillStyle='rgba(245,158,11,.22)';ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(g[0].x,g[0].y);g.slice(1).forEach(q=>ctx.lineTo(q.x,q.y));if(g.length>=3){ctx.closePath();ctx.fill();}ctx.stroke();g.forEach(q=>{ctx.beginPath();ctx.arc(q.x,q.y,4,0,Math.PI*2);ctx.fillStyle='#92400e';ctx.fill();});}
+}
+function undo(n){if(S[n].mode==='cal')S[n].calPts.pop();else if(S[n].mode==='wound')S[n].poly.pop();else if(S[n].mode==='gran')S[n].gran.pop();redraw(n);calc(n);}
+function clearDraw(n){S[n].calPts=[];S[n].poly=[];S[n].gran=[];redraw(n);calc(n);}
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
+function polygonArea(poly){
+  if(poly.length<3)return 0; let a=0;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++) a+=(poly[j].x*poly[i].y-poly[i].x*poly[j].y);
+  return Math.abs(a/2);
+}
+function calc(n){
+  const cp=S[n].calPts,p=S[n].poly,g=S[n].gran,cm=parseFloat(document.getElementById('cal'+n).value);let area=null,granArea=null,granPct=null,calibrated=false;if(cp.length===2&&cm>0){const px=dist(cp[0],cp[1]);if(px>0){const cmPerPx=cm/px;calibrated=true;if(p.length>=3)area=polygonArea(p)*cmPerPx*cmPerPx;if(g.length>=3)granArea=polygonArea(g)*cmPerPx*cmPerPx;if(area&&granArea!==null)granPct=(granArea/area)*100;}}S[n].area=area;S[n].granArea=granArea;S[n].granPct=granPct;document.getElementById('area'+n).textContent=area?area.toFixed(2)+' cm²':'—';document.getElementById('granArea'+n).textContent=granArea!==null?granArea.toFixed(2)+' cm²':'—';document.getElementById('granPct'+n).textContent=granPct!==null?granPct.toFixed(1)+'%':'—';document.getElementById('calStatus'+n).textContent=calibrated?'Calibrated':'Not calibrated';compare();
+}
+document.getElementById('cal1').oninput=()=>calc(1);
+document.getElementById('cal2').oninput=()=>calc(2);
+document.getElementById('date1').onchange=compare;
+document.getElementById('date2').onchange=compare;
+
+function daysBetween(){
+  const a=document.getElementById('date1').value,b=document.getElementById('date2').value;
+  if(!a||!b)return null;
+  return Math.round((new Date(b)-new Date(a))/(1000*3600*24));
+}
+function compare(){
+  const a=S[1].area,b=S[2].area,g1=S[1].granArea,g2=S[2].granArea,gp1=S[1].granPct,gp2=S[2].granPct;const set=(id,v)=>document.getElementById(id).textContent=v;set('tblW1',a?a.toFixed(2)+' cm²':'—');set('tblW2',b?b.toFixed(2)+' cm²':'—');set('tblG1',g1!=null?g1.toFixed(2)+' cm²':'—');set('tblG2',g2!=null?g2.toFixed(2)+' cm²':'—');set('tblGP1',gp1!=null?gp1.toFixed(1)+'%':'—');set('tblGP2',gp2!=null?gp2.toFixed(1)+'%':'—');if(!(a&&b)){drawChart(null,null);return;}const change=b-a,par=(a-b)/a*100,d=daysBetween();set('delta',(change>=0?'+':'')+change.toFixed(2)+' cm²');set('par',par.toFixed(1)+'%');set('rate',(d&&d>0)?((a-b)/d*7).toFixed(2)+' cm²/week':'—');set('tblWChange',(change>=0?'+':'')+change.toFixed(2)+' cm²');if(g1!=null&&g2!=null){const gd=g2-g1;set('granDelta',(gd>=0?'+':'')+gd.toFixed(2)+' cm²');set('tblGChange',(gd>=0?'+':'')+gd.toFixed(2)+' cm²');}else{set('granDelta','—');set('tblGChange','—');}if(gp1!=null&&gp2!=null){const dgp=gp2-gp1;set('granPctDelta',(dgp>=0?'+':'')+dgp.toFixed(1)+' pp');set('currentGranPct',gp2.toFixed(1)+'%');set('tblGPChange',(dgp>=0?'+':'')+dgp.toFixed(1)+' pp');}else{set('granPctDelta','—');set('currentGranPct','—');set('tblGPChange','—');}const dir=par>0?'decreased':par<0?'increased':'did not change';document.getElementById('summary').innerHTML=`Wound area <b>${dir}</b> by <b>${Math.abs(par).toFixed(1)}%</b>: ${a.toFixed(2)} → ${b.toFixed(2)} cm².${d&&d>0?' Interval: '+d+' days.':''}${gp1!=null&&gp2!=null?` Granulation proportion: ${gp1.toFixed(1)}% → ${gp2.toFixed(1)}%.`:''}`;drawChart(a,b);
+}
+function drawChart(a,b){
+  const c=document.getElementById('chart'),ctx=c.getContext('2d');ctx.clearRect(0,0,c.width,c.height);
+  ctx.fillStyle='#667085';ctx.font='16px sans-serif';
+  if(!(a&&b)){ctx.fillText('Area trend will appear after two measurements.',24,40);return;}
+  const max=Math.max(a,b)*1.2;
+  const y=v=>c.height-40-(v/max)*(c.height-70);
+  ctx.strokeStyle='#cbd5e1';ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(50,20);ctx.lineTo(50,c.height-40);ctx.lineTo(c.width-20,c.height-40);ctx.stroke();
+  ctx.strokeStyle='#2563eb';ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(180,y(a));ctx.lineTo(c.width-180,y(b));ctx.stroke();
+  [[180,a,'Baseline'],[c.width-180,b,'Follow-up']].forEach(([x,v,l])=>{
+    ctx.fillStyle='#2563eb';ctx.beginPath();ctx.arc(x,y(v),7,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#172033';ctx.fillText(v.toFixed(1)+' cm²',x-34,y(v)-14);ctx.fillStyle='#667085';ctx.fillText(l,x-32,c.height-15);
+  });
+}
+function generateNote(){
+  const p=document.getElementById('patientId').value||'[patient ID]';
+  const loc=document.getElementById('location').value||'[location]';
+  const type=document.getElementById('woundType').value;
+  const proc=document.getElementById('procedure').value;
+  const a=S[1].area,b=S[2].area,d=daysBetween();
+  let comp='Serial calibrated measurements are not yet complete.';
+  if(a&&b){
+    const par=(a-b)/a*100;
+    comp=`Baseline planimetric area was ${a.toFixed(2)} cm² and follow-up area was ${b.toFixed(2)} cm², representing a ${Math.abs(par).toFixed(1)}% ${par>=0?'reduction':'increase'}${d&&d>0?' over '+d+' days':''}.`;
+  }
+  const t=[];
+  [['gran','granulation'],['slough','slough/fibrin'],['necrosis','necrosis/eschar'],['epi','epithelialization']].forEach(([id,name])=>{
+    const v=document.getElementById(id).value;if(v!=='')t.push(`${name} ${v}%`);
+  });
+  const peri=document.getElementById('peri').value, ex=document.getElementById('exudate').value, extra=document.getElementById('notes').value.trim();
+  let note=`Patient ${p}. ${type} at ${loc}${proc?' following/associated with '+proc:''}. ${comp}`;
+  if(t.length)note+=` Wound-bed estimate: ${t.join(', ')}.`;
+  note+=` Periwound: ${peri}. Exudate: ${ex}.`;
+  if(extra)note+=` Additional findings: ${extra}`;
+  if(document.getElementById('woundType').value==='Burn'){
+    const br=document.getElementById('burnResult');
+    const burnText=br ? br.innerText.replace(/\s+/g,' ').trim() : '';
+    if(burnText && !burnText.includes('—') && !burnText.includes('Insufficient data')) note+=` Burn-depth assistant: ${burnText}`;
+  }
+  note+=` Measurements and burn-depth feature scores require clinician verification.`;
+  document.getElementById('generated').value=note;
+}
+
+
+
+
+function assessBurnDepthV3(){
+  const color = document.getElementById('burnColor').value;
+  const surface = document.getElementById('burnSurface').value;
+  const blanch = document.getElementById('burnBlanch').value;
+  const pain = document.getElementById('burnPain').value;
+  const sensation = document.getElementById('burnSensation').value;
+  const texture = document.getElementById('burnTexture').value;
+  const clinician = document.getElementById('burnClinician').value;
+  const day = parseFloat(document.getElementById('burnDay').value);
+
+  const score={superficial:0,sp:0,mid:0,deep:0,full:0};
+  let known=0;
+  const reasons=[];
+
+  // Colour
+  if(color!=='unknown'){known++;
+    if(color==='red'){score.superficial+=3;score.sp+=1;reasons.push('uniform erythema favors superficial injury');}
+    if(color==='pinkred'){score.sp+=3;score.mid+=1;reasons.push('pink/bright-red appearance favors superficial partial thickness');}
+    if(color==='mottled'){score.mid+=2.5;score.deep+=2;reasons.push('mottled pink/red-white appearance favors mid/deep dermal injury');}
+    if(color==='white'){score.deep+=2;score.full+=2.5;reasons.push('pale/white appearance raises concern for deep dermal or full-thickness injury');}
+    if(color==='brownblack'){score.full+=4;reasons.push('brown/black/charred appearance strongly favors full thickness');}
+  }
+
+  // Surface / blisters
+  if(surface!=='unknown'){known++;
+    if(surface==='noblister'){score.superficial+=3;score.full+=0.5;reasons.push('absence of blister with erythema favors superficial burn');}
+    if(surface==='blistermoist'){score.sp+=3.5;score.mid+=1.5;reasons.push('blistering with a moist surface favors partial thickness');}
+    if(surface==='mottledmoist'){score.mid+=2.5;score.deep+=1.5;reasons.push('patchy partly-moist surface favors deeper partial thickness');}
+    if(surface==='dry'){score.deep+=2;score.full+=1.5;reasons.push('dry/pale surface raises concern for deep partial or full thickness');}
+    if(surface==='leathery'){score.full+=4;reasons.push('dry leathery eschar strongly favors full thickness');}
+  }
+
+  // Blanching
+  if(blanch!=='unknown'){known++;
+    if(blanch==='brisk'){score.superficial+=2;score.sp+=3;reasons.push('brisk blanching favors superficial or superficial-partial injury');}
+    if(blanch==='sluggish'){score.mid+=3;score.deep+=1;reasons.push('delayed blanching favors mid-dermal injury');}
+    if(blanch==='minimal'){score.deep+=3;score.full+=1;reasons.push('minimal blanching favors deep dermal injury');}
+    if(blanch==='none'){score.deep+=1.5;score.full+=3.5;reasons.push('non-blanching raises strong concern for full thickness');}
+  }
+
+  // Pain
+  if(pain!=='unknown'){known++;
+    if(pain==='painful'){score.superficial+=2;score.sp+=2;reasons.push('pain favors superficial/partial-thickness injury');}
+    if(pain==='verypainful'){score.sp+=3;score.mid+=1;reasons.push('marked pain/hypersensitivity favors superficial partial thickness');}
+    if(pain==='reduced'){score.deep+=2.5;score.mid+=1.5;reasons.push('reduced pain favors deeper dermal injury');}
+    if(pain==='minimal'){score.full+=3.5;score.deep+=1;reasons.push('minimal pain raises concern for full thickness');}
+  }
+
+  // Sensation
+  if(sensation!=='unknown'){known++;
+    if(sensation==='normal'){score.superficial+=2;score.sp+=1.5;}
+    if(sensation==='hyper'){score.sp+=3;score.mid+=1;reasons.push('hypersensitivity favors superficial partial thickness');}
+    if(sensation==='reduced'){score.deep+=3;score.mid+=1.5;reasons.push('reduced sensation favors deep dermal injury');}
+    if(sensation==='absent'){score.full+=4;reasons.push('absent sensation strongly favors full thickness');}
+  }
+
+  // Texture
+  if(texture!=='unknown'){known++;
+    if(texture==='soft'){score.superficial+=1.5;score.sp+=2;reasons.push('soft/pliable texture favors superficial injury');}
+    if(texture==='firm'){score.deep+=2;score.full+=1;}
+    if(texture==='leathery'){score.full+=4;reasons.push('firm leathery texture strongly favors full thickness');}
+  }
+
+  // Clinician prior impression gets modest weight, not dominance.
+  if(clinician!=='unknown' && clinician!=='mixed'){known++;score[clinician]+=2;}
+  if(clinician==='mixed'){known++;Object.keys(score).forEach(k=>score[k]+=0.25);}
+
+  const box=document.getElementById('burnResult');
+  if(known<3){
+    box.innerHTML='<span>Burn depth result</span><div class="v">Insufficient data</div><div class="small">Assess at least three clinical features for a meaningful feature-based result.</div>';
+    return;
+  }
+
+  const labels={
+    superficial:'Superficial / 1st degree',
+    sp:'Superficial partial-thickness / 2nd degree',
+    mid:'Mid-dermal partial-thickness / 2nd degree',
+    deep:'Deep partial-thickness / 2nd degree',
+    full:'Full-thickness / 3rd degree'
+  };
+  const ranked=Object.entries(score).sort((a,b)=>b[1]-a[1]);
+  const best=ranked[0], second=ranked[1];
+  const total=Object.values(score).reduce((a,b)=>a+b,0) || 1;
+  const bestShare=Math.round(best[1]/total*100);
+  const secondShare=Math.round(second[1]/total*100);
+  const gap=best[1]-second[1];
+
+  let result=labels[best[0]];
+  let badge='good';
+  let agreement= gap>=4 ? 'Higher feature agreement' : gap>=2 ? 'Moderate feature agreement' : 'Low feature agreement';
+  if(gap<1.25 || clinician==='mixed'){
+    result='Mixed / indeterminate depth';
+    badge='warn';
+  } else if(best[0]==='full') {
+    badge='bad';
+  }
+
+  let dynamic='';
+  if(Number.isFinite(day) && day<=3){
+    dynamic=' Because this is within the first 3 days after injury, repeat assessment is particularly important because burn appearance may evolve.';
+  }
+
+  box.innerHTML=`
+    <span>Predominant burn-depth pattern</span>
+    <div class="v">${result}</div>
+    <div style="margin:8px 0"><span class="badge ${badge}">${agreement}</span></div>
+    <div class="small"><b>Top feature matches:</b> ${labels[best[0]]} ${bestShare}% of heuristic score; ${labels[second[0]]} ${secondShare}%.</div>
+    <div class="small" style="margin-top:6px"><b>Supporting features:</b> ${reasons.length?reasons.join('; '):'none recorded'}.</div>
+    <div class="small" style="margin-top:6px"><b>Important:</b> score shares are not validated diagnostic probabilities.${dynamic}</div>`;
+
+  updateMixedDepth();
+  updateBurnProgression(result, best[0]);
+}
+
+function resetBurnDepthV3(){
+  ['burnMechanism','burnClinician','burnColor','burnSurface','burnBlanch','burnPain','burnSensation','burnTexture','prevBurnDepth']
+    .forEach(id=>{const el=document.getElementById(id); if(el)el.selectedIndex=0;});
+  ['burnDay','prevBurnDay','prevDeepPct'].forEach(id=>document.getElementById(id).value='');
+  ['mixSup','mixSP','mixMid','mixDeep','mixFull','mixInd'].forEach(id=>document.getElementById(id).value=0);
+  document.getElementById('burnResult').innerHTML='<span>Burn depth result</span><div class="v">—</div><div class="small" style="margin-top:6px">Enter the clinical features above.</div>';
+  document.getElementById('mixedSummary').textContent='No mixed-depth percentages entered.';
+  document.getElementById('mixBar').innerHTML='';
+  document.getElementById('progressionResult').textContent='';
+}
+
+function updateMixedDepth(){
+  const vals=[
+    ['Superficial','mixSup'],
+    ['Superficial partial','mixSP'],
+    ['Mid-dermal partial','mixMid'],
+    ['Deep partial','mixDeep'],
+    ['Full thickness','mixFull'],
+    ['Indeterminate','mixInd']
+  ].map(([name,id])=>[name,Math.max(0,Math.min(100,parseFloat(document.getElementById(id).value)||0))]);
+
+  const total=vals.reduce((s,x)=>s+x[1],0);
+  const summary=document.getElementById('mixedSummary');
+  const bar=document.getElementById('mixBar');
+  bar.innerHTML='';
+
+  if(total===0){
+    summary.textContent='No mixed-depth percentages entered.';
+    return;
+  }
+
+  const status=Math.abs(total-100)<0.01 ? '✓ Total = 100%' : `⚠ Total = ${total.toFixed(1)}% (should equal 100%)`;
+  const parts=vals.filter(x=>x[1]>0).map(x=>`${x[0]} ${x[1].toFixed(0)}%`).join(' · ');
+  summary.innerHTML=`<b>${status}</b><br>${parts}`;
+
+  // Use opacity/neutral grayscale variation rather than fixed semantic colors.
+  const opacities=[0.18,0.3,0.42,0.56,0.72,0.9];
+  vals.forEach(([name,v],i)=>{
+    if(v<=0)return;
+    const seg=document.createElement('div');
+    seg.title=`${name}: ${v}%`;
+    seg.style.width=(v/Math.max(total,100)*100)+'%';
+    seg.style.background=`rgba(37,99,235,${opacities[i]})`;
+    bar.appendChild(seg);
+  });
+}
+
+function updateBurnProgression(currentLabel,currentKey){
+  const prev=document.getElementById('prevBurnDepth').value;
+  const prevDay=parseFloat(document.getElementById('prevBurnDay').value);
+  const currDay=parseFloat(document.getElementById('burnDay').value);
+  const prevDeep=parseFloat(document.getElementById('prevDeepPct').value);
+  const currDeep=(parseFloat(document.getElementById('mixDeep').value)||0)+(parseFloat(document.getElementById('mixFull').value)||0);
+  const el=document.getElementById('progressionResult');
+
+  if(prev==='unknown' && !Number.isFinite(prevDeep)){el.textContent='';return;}
+
+  const order={superficial:0,sp:1,mid:2,deep:3,full:4};
+  let msg=[];
+  if(prev!=='unknown' && prev!=='mixed' && currentKey in order){
+    const diff=order[currentKey]-order[prev];
+    if(diff>0)msg.push('Predominant recorded features have shifted toward a deeper burn category.');
+    else if(diff<0)msg.push('Predominant recorded features have shifted toward a more superficial category.');
+    else msg.push('Predominant burn-depth category is unchanged.');
+  } else if(prev==='mixed'){
+    msg.push('Previous assessment was mixed/indeterminate.');
+  }
+
+  if(Number.isFinite(prevDeep) && currDeep>0){
+    const d=currDeep-prevDeep;
+    msg.push(`Deep-partial + full-thickness regional estimate changed from ${prevDeep.toFixed(0)}% to ${currDeep.toFixed(0)}% (${d>=0?'+':''}${d.toFixed(0)} percentage points).`);
+  }
+
+  if(Number.isFinite(prevDay) && Number.isFinite(currDay) && currDay>prevDay){
+    msg.push(`Interval: ${(currDay-prevDay).toFixed(0)} day(s).`);
+  }
+
+  if(msg.length) el.innerHTML='<b>Serial comparison:</b> '+msg.join(' ');
+}
+
+
+let cameraStream=null;
+async function startCamera(){try{stopCamera();const facing=document.getElementById('cameraFacing').value;cameraStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:960}},audio:false});const v=document.getElementById('liveVideo');v.srcObject=cameraStream;await v.play();}catch(err){alert('Camera access failed. On iPhone, browser camera access generally requires HTTPS. '+err.message);}}
+function stopCamera(){if(cameraStream){cameraStream.getTracks().forEach(t=>t.stop());cameraStream=null;}const v=document.getElementById('liveVideo');if(v)v.srcObject=null;}
+function useBaselineAsGhost(){if(!S[1].img){alert('Upload the baseline photo first.');return;}document.getElementById('ghostImage').src=S[1].img.src;}
+document.getElementById('ghostOpacity').oninput=e=>{const op=parseFloat(e.target.value);document.getElementById('ghostImage').style.opacity=op;document.getElementById('ghostOpacityText').textContent=Math.round(op*100)+'%';};
+function captureFollowup(){const v=document.getElementById('liveVideo');if(!v.videoWidth){alert('Open the camera first.');return;}const temp=document.createElement('canvas');temp.width=v.videoWidth;temp.height=v.videoHeight;temp.getContext('2d').drawImage(v,0,0,temp.width,temp.height);const img=new Image();img.onload=()=>{S[2].img=img;S[2].calPts=[];S[2].poly=[];S[2].gran=[];redraw(2);calc(2);if(!document.getElementById('date2').value)document.getElementById('date2').value=new Date().toISOString().slice(0,10);};img.src=temp.toDataURL('image/jpeg',0.94);}
+
+const tbsaSets={
+ adult:[
+  ['Head anterior',4.5],['Head posterior',4.5],['Anterior trunk',18],['Posterior trunk',18],
+  ['Right arm anterior',4.5],['Right arm posterior',4.5],['Left arm anterior',4.5],['Left arm posterior',4.5],
+  ['Right leg anterior',9],['Right leg posterior',9],['Left leg anterior',9],['Left leg posterior',9],['Perineum',1]
+ ],
+ child:[
+  ['Head anterior',9],['Head posterior',9],['Anterior trunk',18],['Posterior trunk',18],
+  ['Right arm anterior',4.5],['Right arm posterior',4.5],['Left arm anterior',4.5],['Left arm posterior',4.5],
+  ['Right leg anterior',7],['Right leg posterior',7],['Left leg anterior',7],['Left leg posterior',7],['Perineum',1]
+ ]
+};
+let tbsaSelected=new Set();
+let currentTBSA=0;
+
+function renderTBSA(){
+  const box=document.getElementById('tbsaRegions'); if(!box)return;
+  tbsaSelected.clear(); box.innerHTML='';
+  const rows=tbsaSets[document.getElementById('tbsaAge').value];
+  rows.forEach((r,i)=>{
+    const b=document.createElement('button');
+    b.type='button'; b.className='secondary'; b.style.textAlign='left';
+    b.innerHTML=`${r[0]} <span class="small">(${r[1]}%)</span>`;
+    b.onclick=()=>{
+      if(tbsaSelected.has(i)){tbsaSelected.delete(i);b.style.outline='';}
+      else{tbsaSelected.add(i);b.style.outline='3px solid #2563eb';}
+      calcTBSA();
+    };
+    box.appendChild(b);
+  });
+  calcTBSA();
+}
+function calcTBSA(){
+  if(!document.getElementById('tbsaAge'))return;
+  const rows=tbsaSets[document.getElementById('tbsaAge').value];
+  let total=Math.max(0,parseFloat(document.getElementById('tbsaPalm').value)||0), parts=[];
+  tbsaSelected.forEach(i=>{total+=rows[i][1];parts.push(`${rows[i][0]} ${rows[i][1]}%`);});
+  currentTBSA=Math.min(100,total);
+  document.getElementById('tbsaTotal').textContent=currentTBSA.toFixed(currentTBSA%1?1:0)+'%';
+  document.getElementById('tbsaBreakdown').textContent=parts.length?parts.join(' · '):'No regions selected.';
+  depthTBSA();
+}
+function depthTBSA(){
+  if(!document.getElementById('tbsaPartial'))return;
+  const p=Math.max(0,parseFloat(document.getElementById('tbsaPartial').value)||0);
+  const f=Math.max(0,parseFloat(document.getElementById('tbsaFull').value)||0);
+  document.getElementById('tbsaPartialOut').textContent=p?p.toFixed(1)+'%':'—';
+  document.getElementById('tbsaFullOut').textContent=f?f.toFixed(1)+'%':'—';
+}
+function resetTBSA(){
+  document.getElementById('tbsaPalm').value=0;
+  document.getElementById('tbsaPartial').value=0;
+  document.getElementById('tbsaFull').value=0;
+  renderTBSA();
+}
+
+
+function val(id){
+  const el=document.getElementById(id);
+  return el ? (el.value!==undefined ? el.value : el.textContent) : '';
+}
+function numberOrBlank(x){
+  return (x===null || x===undefined || Number.isNaN(x)) ? '' : Number(x);
+}
+function collectAppData(includeIdentifiers=true){
+  const a1=S && S[1] ? S[1].area : null;
+  const a2=S && S[2] ? S[2].area : null;
+  const g1=S && S[1] ? S[1].granArea : null;
+  const g2=S && S[2] ? S[2].granArea : null;
+  const gp1=S && S[1] ? S[1].granPct : null;
+  const gp2=S && S[2] ? S[2].granPct : null;
+  const par=(a1&&a2)?((a1-a2)/a1*100):null;
+  const d=typeof daysBetween==='function'?daysBetween():null;
+  const rate=(a1&&a2&&d&&d>0)?((a1-a2)/d*7):null;
+
+  const patientId = val('patientId') || (includeIdentifiers ? ((val('firstName')+' '+val('lastName')).trim()) : ('R-'+Date.now().toString().slice(-8)));
+
+  const data={
+    exported_at:new Date().toISOString(),
+    patient:{
+      patient_id:patientId,
+      first_name:includeIdentifiers?val('firstName'):'',
+      last_name:includeIdentifiers?val('lastName'):'',
+      national_id:includeIdentifiers?val('nationalId'):'',
+      age:val('patientAge'),
+      sex:val('patientSex'),
+      admission_date:val('admissionDate'),
+      phone:includeIdentifiers?val('phone'):'',
+      mrn:includeIdentifiers?val('mrn'):'',
+      hospital:val('hospital')
+    },
+    wound:{
+      location:val('location'),
+      type:val('woundType'),
+      procedure:val('procedure')
+    },
+    baseline:{
+      date:val('date1'),
+      wound_area_cm2:numberOrBlank(a1),
+      granulation_area_cm2:numberOrBlank(g1),
+      granulation_percent:numberOrBlank(gp1)
+    },
+    followup:{
+      date:val('date2'),
+      wound_area_cm2:numberOrBlank(a2),
+      granulation_area_cm2:numberOrBlank(g2),
+      granulation_percent:numberOrBlank(gp2)
+    },
+    comparison:{
+      wound_area_reduction_percent:numberOrBlank(par),
+      healing_rate_cm2_week:numberOrBlank(rate)
+    },
+    tissue:{
+      granulation_percent:val('gran'),
+      slough_percent:val('slough'),
+      necrosis_percent:val('necrosis'),
+      epithelialization_percent:val('epi'),
+      periwound:val('peri'),
+      exudate:val('exudate')
+    },
+    burn:{
+      day_since_burn:val('burnDay'),
+      mechanism:val('burnMechanism'),
+      clinician_impression:val('burnClinician'),
+      color:val('burnColor'),
+      surface:val('burnSurface'),
+      blanching:val('burnBlanch'),
+      pain:val('burnPain'),
+      sensation:val('burnSensation'),
+      texture:val('burnTexture'),
+      tbsa_percent:(typeof currentTBSA!=='undefined'?currentTBSA:''),
+      partial_thickness_tbsa:val('tbsaPartial'),
+      full_thickness_tbsa:val('tbsaFull')
+    },
+    notes:{
+      clinical:val('notes'),
+      generated:val('generated')
+    }
+  };
+  return data;
+}
+function safeFilename(){
+  const mrn=val('mrn') || val('patientId') || 'patient';
+  const date=val('date2') || val('date1') || new Date().toISOString().slice(0,10);
+  return (`WoundMeasure_${mrn}_${date}`).replace(/[^\w\-]+/g,'_');
+}
+function rowsForReport(d){
+  return [
+    ['Patient ID',d.patient.patient_id],['Name',`${d.patient.first_name} ${d.patient.last_name}`.trim()],
+    ['MRN',d.patient.mrn],['Hospital',d.patient.hospital],['Admission date',d.patient.admission_date],
+    ['Wound location',d.wound.location],['Wound type',d.wound.type],['Procedure',d.wound.procedure],
+    ['Baseline date',d.baseline.date],['Baseline wound area (cm²)',d.baseline.wound_area_cm2],
+    ['Baseline granulation area (cm²)',d.baseline.granulation_area_cm2],['Baseline granulation (%)',d.baseline.granulation_percent],
+    ['Follow-up date',d.followup.date],['Follow-up wound area (cm²)',d.followup.wound_area_cm2],
+    ['Follow-up granulation area (cm²)',d.followup.granulation_area_cm2],['Follow-up granulation (%)',d.followup.granulation_percent],
+    ['Wound area reduction (%)',d.comparison.wound_area_reduction_percent],['Healing rate (cm²/week)',d.comparison.healing_rate_cm2_week],
+    ['Burn TBSA (%)',d.burn.tbsa_percent],['Partial-thickness TBSA (%)',d.burn.partial_thickness_tbsa],
+    ['Full-thickness TBSA (%)',d.burn.full_thickness_tbsa]
+  ];
+}
+function exportExcel(){
+  if(typeof XLSX==='undefined'){alert('Excel library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const summary=rowsForReport(d).map(r=>({Parameter:r[0],Value:r[1]}));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(summary),'Summary');
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet([{
+    patient_id:d.patient.patient_id, first_name:d.patient.first_name,last_name:d.patient.last_name,national_id:d.patient.national_id,
+    age:d.patient.age,sex:d.patient.sex,phone:d.patient.phone,mrn:d.patient.mrn,hospital:d.patient.hospital,admission_date:d.patient.admission_date,
+    wound_location:d.wound.location,wound_type:d.wound.type,procedure:d.wound.procedure,
+    baseline_date:d.baseline.date,baseline_area_cm2:d.baseline.wound_area_cm2,baseline_granulation_cm2:d.baseline.granulation_area_cm2,baseline_granulation_pct:d.baseline.granulation_percent,
+    followup_date:d.followup.date,followup_area_cm2:d.followup.wound_area_cm2,followup_granulation_cm2:d.followup.granulation_area_cm2,followup_granulation_pct:d.followup.granulation_percent,
+    wound_area_reduction_pct:d.comparison.wound_area_reduction_percent,healing_rate_cm2_week:d.comparison.healing_rate_cm2_week,
+    tbsa_pct:d.burn.tbsa_percent,partial_tbsa_pct:d.burn.partial_thickness_tbsa,full_tbsa_pct:d.burn.full_thickness_tbsa
+  }]),'Research Data');
+  XLSX.writeFile(wb,safeFilename()+'.xlsx');
+}
+function exportResearchExcel(){
+  if(typeof XLSX==='undefined'){alert('Excel library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(false);
+  const row={
+    research_patient_id:d.patient.patient_id,age:d.patient.age,sex:d.patient.sex,hospital:d.patient.hospital,admission_date:d.patient.admission_date,
+    wound_location:d.wound.location,wound_type:d.wound.type,procedure:d.wound.procedure,
+    baseline_date:d.baseline.date,baseline_area_cm2:d.baseline.wound_area_cm2,baseline_granulation_cm2:d.baseline.granulation_area_cm2,baseline_granulation_pct:d.baseline.granulation_percent,
+    followup_date:d.followup.date,followup_area_cm2:d.followup.wound_area_cm2,followup_granulation_cm2:d.followup.granulation_area_cm2,followup_granulation_pct:d.followup.granulation_percent,
+    wound_area_reduction_pct:d.comparison.wound_area_reduction_percent,healing_rate_cm2_week:d.comparison.healing_rate_cm2_week,
+    tbsa_pct:d.burn.tbsa_percent,partial_tbsa_pct:d.burn.partial_thickness_tbsa,full_tbsa_pct:d.burn.full_thickness_tbsa
+  };
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet([row]),'Anonymized Research');
+  XLSX.writeFile(wb,'Research_'+new Date().toISOString().slice(0,10)+'.xlsx');
+}
+async function exportPDF(){
+  if(!window.jspdf){alert('PDF library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const {jsPDF}=window.jspdf;
+  const pdf=new jsPDF({unit:'mm',format:'a4'});
+  let y=15;
+  pdf.setFontSize(16); pdf.text('WoundMeasure Clinical Report',14,y); y+=9;
+  pdf.setFontSize(9); pdf.text('Generated: '+new Date().toLocaleString(),14,y); y+=8;
+  pdf.setFontSize(10);
+  for(const [k,v] of rowsForReport(d)){
+    const line=`${k}: ${v===null||v===undefined||v===''?'—':v}`;
+    const lines=pdf.splitTextToSize(line,180);
+    if(y+lines.length*5>282){pdf.addPage();y=15;}
+    pdf.text(lines,14,y); y+=lines.length*5+1;
+  }
+  const notes=(d.notes.generated||d.notes.clinical||'').trim();
+  if(notes){
+    y+=4; if(y>250){pdf.addPage();y=15;}
+    pdf.setFontSize(12);pdf.text('Clinical note',14,y);y+=6;pdf.setFontSize(9);
+    const lines=pdf.splitTextToSize(notes,180);
+    for(const ln of lines){if(y>282){pdf.addPage();y=15;}pdf.text(ln,14,y);y+=4.5;}
+  }
+  // Add images when available
+  for(const item of [[1,'Baseline photograph'],[2,'Follow-up photograph']]){
+    const s=S[item[0]];
+    if(s && s.img && s.img.src && s.img.src.startsWith('data:image')){
+      pdf.addPage();pdf.setFontSize(12);pdf.text(item[1],14,15);
+      try{pdf.addImage(s.img.src,'JPEG',14,22,180,135,undefined,'FAST');}catch(e){}
+    }
+  }
+  pdf.save(safeFilename()+'.pdf');
+}
+async function exportWord(){
+  if(typeof docx==='undefined'){alert('Word library is not loaded. Check internet connection.');return;}
+  const d=collectAppData(true);
+  const {Document,Packer,Paragraph,TextRun,Table,TableRow,TableCell,WidthType,HeadingLevel}=docx;
+  const tableRows=rowsForReport(d).map(([k,v])=>new TableRow({children:[
+    new TableCell({children:[new Paragraph({children:[new TextRun({text:String(k),bold:true})]})]}),
+    new TableCell({children:[new Paragraph(String(v===null||v===undefined||v===''?'—':v))]})
+  ]}));
+  const children=[
+    new Paragraph({text:'WoundMeasure Clinical Report',heading:HeadingLevel.TITLE}),
+    new Paragraph('Generated: '+new Date().toLocaleString()),
+    new Table({rows:tableRows,width:{size:100,type:WidthType.PERCENTAGE}}),
+    new Paragraph({text:'Clinical note',heading:HeadingLevel.HEADING_2}),
+    new Paragraph(d.notes.generated||d.notes.clinical||'—')
+  ];
+  const documentFile=new Document({sections:[{children}]});
+  const blob=await Packer.toBlob(documentFile);
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=safeFilename()+'.docx';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+function saveDriveSettings(){
+  localStorage.setItem('woundmeasure_drive_endpoint',val('driveEndpoint'));
+  localStorage.setItem('woundmeasure_drive_folder',val('driveFolder'));
+  const s=document.getElementById('driveStatus');s.className='successbox small';s.textContent='Drive settings saved on this device.';
+}
+function loadDriveSettings(){
+  const e=localStorage.getItem('woundmeasure_drive_endpoint');const f=localStorage.getItem('woundmeasure_drive_folder');
+  if(e&&document.getElementById('driveEndpoint'))document.getElementById('driveEndpoint').value=e;
+  if(f&&document.getElementById('driveFolder'))document.getElementById('driveFolder').value=f;
+}
+async function saveToGoogleDrive(){
+  const endpoint=val('driveEndpoint').trim();
+  const status=document.getElementById('driveStatus');
+  if(!endpoint){status.className='errorbox small';status.textContent='Enter your deployed Google Apps Script Web App URL first.';return;}
+  const payload=collectAppData(true);
+  payload.drive_root_folder=val('driveFolder')||'WoundMeasure';
+  // include current photos if they are browser data URLs
+  payload.images={};
+  if(S[1]&&S[1].img&&S[1].img.src&&S[1].img.src.startsWith('data:image'))payload.images.baseline=S[1].img.src;
+  if(S[2]&&S[2].img&&S[2].img.src&&S[2].img.src.startsWith('data:image'))payload.images.followup=S[2].img.src;
+  status.className='status small';status.textContent='Saving to Google Drive…';
+  try{
+    const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});
+    const txt=await res.text();
+    let result={};try{result=JSON.parse(txt);}catch(e){result={ok:res.ok,message:txt};}
+    if(!res.ok || result.ok===false)throw new Error(result.error||result.message||'Save failed');
+    status.className='successbox small';
+    status.innerHTML=`Saved to Google Drive.${result.folder_url?` <a href="${result.folder_url}" target="_blank">Open patient folder</a>`:''}`;
+  }catch(err){
+    status.className='errorbox small';
+    status.textContent='Google Drive save failed: '+err.message;
+  }
+}
+document.addEventListener('DOMContentLoaded',()=>{loadDriveSettings(); if(document.getElementById('tbsaRegions'))renderTBSA();});
+
+
+let previousPatientResults=[];
+
+function driveEndpoint(){
+  const el=document.getElementById('driveEndpoint');
+  return el ? el.value.trim() : '';
+}
+
+async function searchPreviousPatient(){
+  const endpoint=driveEndpoint();
+  const key=(document.getElementById('searchPatientKey').value||'').trim();
+  const status=document.getElementById('patientSearchStatus');
+  const box=document.getElementById('previousPatientBox');
+
+  if(!endpoint){
+    status.className='errorbox small';
+    status.textContent='Configure your Google Apps Script Web App URL in the Google Drive section first.';
+    return;
+  }
+  if(!key){
+    status.className='errorbox small';
+    status.textContent='Enter an MRN or Patient ID.';
+    return;
+  }
+
+  status.className='status small';
+  status.textContent='Searching Google Drive…';
+  box.style.display='none';
+
+  try{
+    const url=endpoint + (endpoint.includes('?')?'&':'?') +
+      'action=searchPatient&key=' + encodeURIComponent(key) +
+      '&root=' + encodeURIComponent(val('driveFolder')||'WoundMeasure');
+
+    const res=await fetch(url,{method:'GET'});
+    const txt=await res.text();
+    let data={};
+    try{data=JSON.parse(txt);}catch(e){throw new Error(txt||'Invalid server response');}
+    if(!res.ok || data.ok===false) throw new Error(data.error||'Search failed');
+    if(!data.found){
+      previousPatientResults=[];
+      status.className='status small';
+      status.textContent='No patient folder or assessment was found for this MRN/Patient ID.';
+      return;
+    }
+
+    previousPatientResults=data.assessments||[];
+    const p=data.patient||{};
+    document.getElementById('previousPatientTitle').textContent=
+      ((p.first_name||'')+' '+(p.last_name||'')).trim() || p.patient_id || p.mrn || key;
+    document.getElementById('previousPatientMeta').textContent=
+      `MRN: ${p.mrn||'—'} · Patient ID: ${p.patient_id||'—'} · Hospital: ${p.hospital||'—'} · Assessments: ${previousPatientResults.length}`;
+
+    const body=document.getElementById('previousVisitsBody');
+    body.innerHTML='';
+    previousPatientResults.forEach((a,i)=>{
+      const tr=document.createElement('tr');
+      const gran=(a.followup && a.followup.granulation_percent!=='' && a.followup.granulation_percent!=null)
+        ? Number(a.followup.granulation_percent).toFixed(1)+'%' : '—';
+      const area=(a.followup && a.followup.wound_area_cm2!=='' && a.followup.wound_area_cm2!=null)
+        ? Number(a.followup.wound_area_cm2).toFixed(2)+' cm²'
+        : (a.baseline && a.baseline.wound_area_cm2!=='' && a.baseline.wound_area_cm2!=null)
+          ? Number(a.baseline.wound_area_cm2).toFixed(2)+' cm²' : '—';
+      const tbsa=(a.burn && a.burn.tbsa_percent!=='' && a.burn.tbsa_percent!=null)
+        ? Number(a.burn.tbsa_percent).toFixed(1)+'%' : '—';
+      const date=(a.followup&&a.followup.date)||(a.baseline&&a.baseline.date)||a.exported_at||'—';
+      const wound=(a.wound&&a.wound.location)||'—';
+
+      tr.innerHTML=`
+        <td>${escapeHtml(String(date))}</td>
+        <td>${escapeHtml(String(wound))}</td>
+        <td>${escapeHtml(String(area))}</td>
+        <td>${escapeHtml(String(gran))}</td>
+        <td>${escapeHtml(String(tbsa))}</td>
+        <td>
+          <button class="secondary" onclick="openPreviousAssessment(${i})">Open</button>
+          ${a.latest_photo_url ? `<button class="ghost" onclick="loadPreviousPhotoAsGhost(${i})">Ghost</button>` : ''}
+        </td>`;
+      body.appendChild(tr);
+    });
+
+    status.className='successbox small';
+    status.textContent='Patient found. Select a previous assessment.';
+    box.style.display='block';
+  }catch(err){
+    status.className='errorbox small';
+    status.textContent='Search failed: '+err.message;
+  }
+}
+
+function escapeHtml(s){
+  return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+}
+
+function setField(id,value){
+  const el=document.getElementById(id);
+  if(el && value!==undefined && value!==null) el.value=value;
+}
+
+function openPreviousAssessment(i){
+  const d=previousPatientResults[i];
+  if(!d)return;
+  const p=d.patient||{}, w=d.wound||{}, b=d.burn||{}, t=d.tissue||{}, n=d.notes||{};
+
+  setField('patientId',p.patient_id||'');
+  setField('firstName',p.first_name||'');
+  setField('lastName',p.last_name||'');
+  setField('nationalId',p.national_id||'');
+  setField('patientAge',p.age||'');
+  setField('patientSex',p.sex||'');
+  setField('admissionDate',p.admission_date||'');
+  setField('phone',p.phone||'');
+  setField('mrn',p.mrn||'');
+  setField('hospital',p.hospital||'');
+
+  setField('location',w.location||'');
+  setField('woundType',w.type||'');
+  setField('procedure',w.procedure||'');
+
+  setField('date1',(d.followup&&d.followup.date)||(d.baseline&&d.baseline.date)||'');
+  setField('gran',t.granulation_percent||'');
+  setField('slough',t.slough_percent||'');
+  setField('necrosis',t.necrosis_percent||'');
+  setField('epi',t.epithelialization_percent||'');
+  setField('peri',t.periwound||'');
+  setField('exudate',t.exudate||'');
+  setField('notes',n.clinical||'');
+  setField('generated',n.generated||'');
+
+  setField('burnDay',b.day_since_burn||'');
+  setField('burnMechanism',b.mechanism||'');
+  setField('burnClinician',b.clinician_impression||'');
+  setField('burnColor',b.color||'');
+  setField('burnSurface',b.surface||'');
+  setField('burnBlanch',b.blanching||'');
+  setField('burnPain',b.pain||'');
+  setField('burnSensation',b.sensation||'');
+  setField('burnTexture',b.texture||'');
+
+  // Restore numeric previous visit values for comparison.
+  const srcVisit=(d.followup && d.followup.wound_area_cm2!=='' && d.followup.wound_area_cm2!=null) ? d.followup : d.baseline;
+  if(typeof S!=='undefined' && S[1]){
+    S[1].area=srcVisit && srcVisit.wound_area_cm2!=='' ? Number(srcVisit.wound_area_cm2) : null;
+    S[1].granArea=srcVisit && srcVisit.granulation_area_cm2!=='' ? Number(srcVisit.granulation_area_cm2) : null;
+    S[1].granPct=srcVisit && srcVisit.granulation_percent!=='' ? Number(srcVisit.granulation_percent) : null;
+    const area1=document.getElementById('area1');
+    if(area1)area1.textContent=S[1].area!=null?S[1].area.toFixed(2)+' cm²':'—';
+    const ga1=document.getElementById('granArea1');
+    if(ga1)ga1.textContent=S[1].granArea!=null?S[1].granArea.toFixed(2)+' cm²':'—';
+    const gp1=document.getElementById('granPct1');
+    if(gp1)gp1.textContent=S[1].granPct!=null?S[1].granPct.toFixed(1)+'%':'—';
+  }
+
+  if(typeof compare==='function') compare();
+
+  document.getElementById('patientSearchStatus').className='successbox small';
+  document.getElementById('patientSearchStatus').textContent='Previous assessment loaded into the form. You can now take the new follow-up photograph.';
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+async function loadPreviousPhotoAsGhost(i){
+  const d=previousPatientResults[i];
+  if(!d || !d.latest_photo_url){
+    alert('No previous photograph is available for this assessment.');
+    return;
+  }
+  try{
+    const res=await fetch(d.latest_photo_url);
+    if(!res.ok)throw new Error('Photo download failed');
+    const payload=await res.json();
+    if(!payload.ok || !payload.data_url)throw new Error(payload.error||'No image returned');
+    const dataUrl=payload.data_url;
+    {
+      const ghost=document.getElementById('ghostImage');
+      if(ghost)ghost.src=dataUrl;
+
+      const img=new Image();
+      img.onload=()=>{
+        if(typeof S!=='undefined' && S[1]){
+          S[1].img=img;
+          if(typeof redraw==='function') redraw(1);
+        }
+      };
+      img.src=dataUrl;
+
+      document.getElementById('patientSearchStatus').className='successbox small';
+      document.getElementById('patientSearchStatus').textContent='Previous photograph loaded as Ghost Overlay. Open the camera and align the current wound.';
+    }
+  }catch(err){
+    document.getElementById('patientSearchStatus').className='errorbox small';
+    document.getElementById('patientSearchStatus').textContent='Could not load previous photograph: '+err.message;
+  }
+}
+
+function clearPatientSearch(){
+  previousPatientResults=[];
+  document.getElementById('searchPatientKey').value='';
+  document.getElementById('patientSearchStatus').className='status small';
+  document.getElementById('patientSearchStatus').textContent='Enter MRN or Patient ID.';
+  document.getElementById('previousPatientBox').style.display='none';
+  document.getElementById('previousVisitsBody').innerHTML='';
+}
+
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('./service-worker.js').catch(()=>{}));
+}
+
+const WM_DB='WoundMeasureOfflineDB', WM_STORE='records';
+
+function openWMDB(){
+  return new Promise((resolve,reject)=>{
+    const req=indexedDB.open(WM_DB,1);
+    req.onupgradeneeded=()=>{
+      const db=req.result;
+      if(!db.objectStoreNames.contains(WM_STORE)){
+        const s=db.createObjectStore(WM_STORE,{keyPath:'id'});
+        s.createIndex('synced','synced',{unique:false});
+        s.createIndex('saved_at','saved_at',{unique:false});
+      }
+    };
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function dbPut(record){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readwrite');
+    tx.objectStore(WM_STORE).put(record);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+async function dbAll(){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readonly');
+    const req=tx.objectStore(WM_STORE).getAll();
+    req.onsuccess=()=>resolve(req.result||[]);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function dbDelete(id){
+  const db=await openWMDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(WM_STORE,'readwrite');
+    tx.objectStore(WM_STORE).delete(id);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+function offlineCollectData(){
+  if(typeof collectAppData==='function'){
+    const d=collectAppData(true);
+    d.images=d.images||{};
+    try{
+      if(S[1]&&S[1].img&&S[1].img.src&&S[1].img.src.startsWith('data:image'))d.images.baseline=S[1].img.src;
+      if(S[2]&&S[2].img&&S[2].img.src&&S[2].img.src.startsWith('data:image'))d.images.followup=S[2].img.src;
+    }catch(e){}
+    return d;
+  }
+  return {saved_at:new Date().toISOString()};
+}
+async function saveOfflineRecord(){
+  const s=document.getElementById('offlineStatus');
+  try{
+    const id='WM-'+Date.now();
+    await dbPut({id,saved_at:new Date().toISOString(),synced:false,data:offlineCollectData()});
+    s.textContent='Saved on this device for offline use.';
+    s.className='successbox small';
+    showOfflineRecords();
+  }catch(e){
+    s.textContent='Offline save failed: '+e.message;
+    s.className='errorbox small';
+  }
+}
+async function showOfflineRecords(){
+  const list=document.getElementById('offlineList');
+  const rows=(await dbAll()).sort((a,b)=>String(b.saved_at).localeCompare(String(a.saved_at)));
+  if(!rows.length){list.innerHTML='<div class="small">No offline records stored.</div>';return;}
+  list.innerHTML=rows.map(r=>{
+    const p=(r.data&&r.data.patient)||{};
+    const name=((p.first_name||'')+' '+(p.last_name||'')).trim()||p.patient_id||p.mrn||'Unnamed';
+    return `<div class="kpi" style="margin-bottom:8px"><b>${name}</b><br><span class="small">${new Date(r.saved_at).toLocaleString()} · ${r.synced?'Synced':'Pending sync'}</span><div class="toolbar"><button class="secondary" onclick="deleteOfflineRecord('${r.id}')">Delete</button></div></div>`;
+  }).join('');
+}
+async function deleteOfflineRecord(id){await dbDelete(id);showOfflineRecords();}
+async function syncOfflineRecords(){
+  const s=document.getElementById('offlineStatus');
+  if(!navigator.onLine){s.textContent='No internet connection. Records stay on this device.';s.className='errorbox small';return;}
+  const endpoint=(document.getElementById('driveEndpoint')||{}).value||'';
+  if(!endpoint.trim()){s.textContent='Enter your Google Apps Script URL first.';s.className='errorbox small';return;}
+  const rows=await dbAll(); let ok=0,fail=0;
+  for(const r of rows.filter(x=>!x.synced)){
+    try{
+      r.data.drive_root_folder=((document.getElementById('driveFolder')||{}).value)||'WoundMeasure';
+      const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(r.data)});
+      const t=await res.text(); let j={}; try{j=JSON.parse(t)}catch(e){}
+      if(!res.ok||j.ok===false)throw new Error(j.error||'Sync failed');
+      r.synced=true;r.synced_at=new Date().toISOString();await dbPut(r);ok++;
+    }catch(e){fail++;}
+  }
+  s.textContent=`Sync complete: ${ok} synced, ${fail} failed.`;
+  s.className=fail?'errorbox small':'successbox small';
+  showOfflineRecords();
+}
+window.addEventListener('online',()=>{const s=document.getElementById('offlineStatus');if(s){s.textContent='Internet restored. You can sync pending records.';s.className='successbox small';}});
+window.addEventListener('offline',()=>{const s=document.getElementById('offlineStatus');if(s){s.textContent='Offline mode active.';s.className='status small';}});
+
+</script>
+</body>
+</html>
